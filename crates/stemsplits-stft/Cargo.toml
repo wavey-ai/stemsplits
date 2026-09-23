@@ -1,0 +1,13 @@
+[package]
+name = "stemsplits-stft"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The HTDemucs STFT/iSTFT contract, ported from Wavey's StemSeparator.swift"
+
+[dependencies]
+rustfft.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "stemsplits-demucs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "HTDemucs chunk plan and overlap-add seam, pinned once for every backend"
+
+[dependencies]
+stemsplits-stft = { path = "../stemsplits-stft" }
+
+[dev-dependencies]
+anyhow.workspace = true

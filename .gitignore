@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+*.mlpackage
+*.mlmodelc
+*.onnx
+*.pt
+*.safetensors
+/tools/**/out
+/tools/**/downloads
+.DS_Store
