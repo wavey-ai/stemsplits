@@ -10,11 +10,11 @@ decision was made.
 
 Wavey separates tracks on device with a Core ML HTDemucs package
 (`StemSeparator.swift`). The question was whether the same work can
-run on a server — the service already fans out ECDC encoding one independent
+run on a server — the ECDC service already fans out ECDC encoding one independent
 segment per Lambda invocation — and whether the seam can be shared so the
 phone and the cloud cannot disagree.
 
-The ECDC work the ECDC cloud-offload work set the shape: one
+The ECDC work (`the ECDC cloud-offload work`) set the shape: one
 independent segment per invocation, fan out, concatenate. EnCodec's segments
 are fixed-context, so they are byte-exact and order-free. HTDemucs is not: its
 segment is the model's own inference unit and its output depends on the

@@ -23,16 +23,16 @@ Accuracy against PyTorch on the same input:
 The Rust port is currently the more accurate of the two against PyTorch; the
 ONNX export folds constants more aggressively.
 
-Artifact size: the Rust binary is ~1 MB with no ONNX Runtime linked (58.4 MB
-here as a Python extension, ~15–20 MB for the bare shared library). The f32
-weights are 168 MB either way; an f16 bundle is planned.
+Artifact size: the Rust binary is ~1 MB and self-contained; ONNX Runtime adds
+58.4 MB here as a Python extension (~15–20 MB for the bare shared library).
+The f32 weights are 168 MB either way; an f16 bundle is planned.
 
 ## The kernel pass
 
 Each step was measured with `cargo run --release -p stemsplits-htdemucs --bin
-bench`. The Rust scalar loop does not vectorise — a reduction cannot be
-reassociated without changing the result, and the compiler will not do it — so
-blocking and `target-cpu=native` did not help until the SIMD was explicit.
+bench`. The Rust scalar loop stays scalar: reassociating a reduction changes
+the result, so the compiler preserves the accumulation order, and blocking
+with `target-cpu=native` held performance steady until the SIMD was explicit.
 
 | change | RTF |
 | --- | ---: |
@@ -46,7 +46,7 @@ blocking and `target-cpu=native` did not help until the SIMD was explicit.
 
 The GEMM is `crates/stemsplits-htdemucs/kernels/gemm.c`, compiled by
 `build.rs` with AVX2/FMA on x86 and NEON on aarch64. Its per-output
-accumulation order is unchanged, so only FMA contraction moves the result,
+accumulation order is preserved, so FMA contraction alone moves the result,
 inside the parity tolerance (stems stay at 2.99e-6). The approach mirrors
 [encodec-rs](https://github.com/wavey-ai/encodec-rs).
 

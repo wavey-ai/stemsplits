@@ -3,7 +3,7 @@
 The question this directory answers: is cloud stem separation worth it, and
 for which devices?
 
-The ECDC cloud-offload work the ECDC cloud-offload work set
+The ECDC cloud-offload work (`the ECDC cloud-offload work`) set
 the method. Follow it:
 
 - Measure the **slowest supported device**, not the Mac.
