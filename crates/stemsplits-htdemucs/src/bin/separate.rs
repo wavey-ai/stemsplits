@@ -61,9 +61,9 @@ fn main() {
     let names = ["drums", "bass", "other", "vocals"];
     for (name, stem) in names.iter().zip(&stems) {
         let mut interleaved = Vec::with_capacity(left.len() * 2);
-        for position in 0..left.len() {
-            interleaved.push(to_i16(stem[0][position]));
-            interleaved.push(to_i16(stem[1][position]));
+        for (left_sample, right_sample) in stem[0].iter().zip(&stem[1]) {
+            interleaved.push(to_i16(*left_sample));
+            interleaved.push(to_i16(*right_sample));
         }
         let path = output_directory.join(format!("{name}.wav"));
         wav::write(&path, 44_100, 2, &interleaved).expect("write stem");

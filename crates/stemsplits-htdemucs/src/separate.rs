@@ -56,8 +56,8 @@ pub fn separate(
         let waveform = Tensor::new(vec![1, 2, segment], interleaved);
 
         let (frequency, time) = model.forward(&magnitude, &waveform);
-        for stem in 0..4 {
-            for channel in 0..2 {
+        for (stem, channels) in accumulators.iter_mut().enumerate() {
+            for (channel, accumulator) in channels.iter_mut().enumerate() {
                 let real_channel = stem * 4 + channel * 2;
                 let real =
                     frequency.data[real_channel * planes..(real_channel + 1) * planes].to_vec();
@@ -70,19 +70,20 @@ pub fn separate(
                 for (position, value) in rendered.iter_mut().enumerate() {
                     *value = time.data[time_base + position] + inverse[position] * scale;
                 }
-                accumulators[stem][channel].add(offset, &rendered, &window);
+                accumulator.add(offset, &rendered, &window);
             }
         }
         progress(index + 1, offsets.len());
     }
 
-    (0..4)
-        .map(|stem| {
+    accumulators
+        .into_iter()
+        .map(|channels| {
             let mut output = [Vec::new(), Vec::new()];
-            for (channel, slot) in output.iter_mut().enumerate() {
-                let mut values = accumulators[stem][channel].finish();
+            for (channel, mut accumulator) in channels.into_iter().enumerate() {
+                let mut values = accumulator.finish();
                 values.truncate(total);
-                *slot = values;
+                output[channel] = values;
             }
             output
         })
