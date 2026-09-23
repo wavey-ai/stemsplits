@@ -1,13 +1,14 @@
 # stemsplits
 
-Four-stem HTDemucs separation that can run on a phone or fan out across a
-cloud, producing the same stems either way.
+Four-stem HTDemucs separation in pure Rust — the same work Wavey does on
+device, ported so a server can run it too, with the seam defined once instead
+of once per backend.
 
-Wavey already separates tracks on device: `StemSeparator.swift` runs the
-MIT-licensed Core ML HTDemucs package, cutting a track into 7.8-second
-segments with 25% overlap and sewing them back with triangular overlap-add.
-This repository is the same work in Rust, so a server can run it too — and so
-the seam is defined once instead of once per backend.
+Wavey separates tracks with the MIT-licensed Core ML HTDemucs package,
+cutting a track into 7.8-second segments with 25% overlap and sewing them back
+with triangular overlap-add. This repository is that same pipeline in Rust:
+the STFT contract, the chunk plan, the overlap-add seam, the model, and its
+kernels. No ONNX and no PyTorch in the shipping path.
 
 ## Why it exists
 
@@ -20,23 +21,28 @@ so the phone and the cloud cannot disagree on a seam.
 
 ## No ONNX at runtime
 
-`encodec-rs` removed ONNX from the shipping path: it extracts weights and
-drives its own C SIMD kernels, with a portable Rust reference beside them and
-FP contraction pinned off so the backends agree. This repository follows that
-rule. PyTorch/ONNX are **oracles for parity tests**, not runtime dependencies.
-The plan is portable Rust first, then kernels for the hot ops.
+[`encodec-rs`](https://github.com/wavey-ai/encodec-rs) removed ONNX from the
+shipping path: it extracts weights and drives its own C SIMD kernels, with a
+portable Rust reference beside them. This repository follows that rule.
+PyTorch and ONNX are **oracles for parity tests**, not runtime dependencies.
+The port was written scalar and obvious first, then the hot ops became
+kernels. One 7.8 s segment runs at **RTF 1.61** single-threaded — faster than
+ONNX Runtime on one thread (2.61) and near its eight-thread run (1.13); the
+tables and method are in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 ## Layout
 
 ```
 crates/
-  stemsplits-stft/    the STFT/iSTFT contract, ported from StemSeparator.swift
-  stemsplits-demucs/  StemKind, the chunk plan, and the overlap-add seam
-  stemsplits-model/   the weight bundle format and loader
+  stemsplits-stft/     the STFT/iSTFT contract, ported from StemSeparator.swift
+  stemsplits-demucs/   StemKind, the chunk plan, and the overlap-add seam
+  stemsplits-model/    the weight bundle format and loader
+  stemsplits-htdemucs/ the forward pass and its C GEMM kernel
 tools/
-  oracle-stft/        the Swift/vDSP oracle and its golden vectors
-  reference/          the PyTorch reference, the pinned config, and the export
-bench/                real-time-factor and memory benchmarks
+  oracle-stft/         the Swift/vDSP oracle and its golden vectors
+  reference/           the PyTorch reference, pinned config, export, ONNX baseline
+bench/                 real-time-factor and memory benchmarks
+docs/                  the decision log and the benchmarks
 ```
 
 ## The model
@@ -51,33 +57,33 @@ activations. The config is pinned in `tools/reference/demucs_config.json`.
 
 ## Status
 
-Done:
-
 - `stemsplits-stft` matches the on-device Swift/vDSP transform to within f32
-  rounding, proven against a golden vector (`cargo test`).
-- The Demucs seam (chunk plan + triangular overlap-add) is pinned and tested,
+  rounding, proven against a golden vector.
+- The chunk plan and triangular overlap-add seam are pinned and tested,
   including that streaming flush equals batch flush.
 - The weight bundle is defined, exported from PyTorch (533 tensors, 41.98 M
   parameters), and loadable in Rust by the reference's own tensor names.
-- The reference harness runs HTDemucs on a fixed segment and dumps the stems
-  and encoder activations to check a layer port against.
-- The full forward pass matches the reference stems to 3e-6.
-- The single-threaded kernel pass brings one 7.8 s segment to **RTF 1.61**,
-  faster than ONNX Runtime on one thread (2.61) and near its eight-thread run
-  (1.13). The GEMM is C with AVX2/FMA or NEON, as in `encodec-rs`.
+- The full forward pass matches the reference stems to 3e-6, layer by layer
+  against dumped activations.
+- The single-threaded kernel pass reaches RTF 1.61.
 
-Next:
+Next: the arm64/Graviton measurement that decides cloud versus phone, f16
+weights, a segment API and fan-out mirroring `bench/ecdc/aws`, and threading
+only if a multi-vCPU function is chosen (a 1769 MB Lambda gets one vCPU).
 
-- The arm64/Graviton measurement that decides cloud versus phone, then f16
-  weights, then threading (only if a multi-vCPU function is chosen).
-- RTF measurement on arm64 (Graviton) to decide whether cloud stems beat the
-  phone.
-- A segment API and fan-out, mirroring `bench/ecdc/aws`.
+## Build and test
 
-## Test
+Requires a Rust toolchain and a C compiler (for the GEMM kernel).
 
 ```sh
 cargo test
+```
+
+The activation and stem tests need the PyTorch export and the reference dump
+(the 168 MB bundle is gitignored); run them with:
+
+```sh
+cargo test --release -p stemsplits-htdemucs -- --ignored --nocapture
 ```
 
 Regenerate the Swift oracle golden (macOS only) after changing the contract:
@@ -86,3 +92,7 @@ Regenerate the Swift oracle golden (macOS only) after changing the contract:
 swift tools/oracle-stft/main.swift tools/oracle-stft/out
 cp tools/oracle-stft/out/stft-small.bin crates/stemsplits-stft/tests/golden/
 ```
+
+The full reasoning — the decisions, the model identification, the exact
+forward, and the kernel journey — is in
+[`docs/DECISION_LOG.md`](docs/DECISION_LOG.md).
