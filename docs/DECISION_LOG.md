@@ -172,20 +172,46 @@ pass and does the per-sample mean/std normalisation the Core ML graph bakes
 in. The end-to-end test feeds the raw CaC magnitude and waveform, runs the
 model, and reconstructs stems with `stemsplits-stft`, matching PyTorch.
 
-### The first benchmark: the naive port is slow, and that is the finding
+### The baseline: ONNX Runtime, PyTorch, and the naive Rust port
 
-`cargo run --release -p stemsplits-htdemucs --bin bench` times one 7.8 s
-segment. The scalar first pass is **343 s, RTF 44**, against PyTorch CPU's
-**8.49 s, RTF 1.09** on 8 threads. We are ~40× slower than the reference
-today; nothing is SIMD, nothing is threaded, and the attention materialises
-its score matrix.
+`tools/reference/export_onnx.py` exports the same I/O contract (mag +
+waveform in, freq/time out) to ONNX; `bench_onnx.py` measures it and checks
+it against PyTorch. `cargo run --release -p stemsplits-htdemucs --bin bench`
+times the Rust port. One 7.8 s segment, on this machine:
 
-This matters beyond the port. EnCodec's ECDC runs at RTF 0.04 on Lambda
+| implementation | threads | s/segment | RTF | artifact |
+| --- | ---: | ---: | ---: | ---: |
+| Rust, naive scalar | 1 | 343 | 44.0 | 987 KB binary |
+| ONNX Runtime | 1 | 20.4 | 2.61 | 174.3 MB onnx + 58.4 MB lib |
+| ONNX Runtime | 8 | 8.79 | 1.13 | |
+| PyTorch CPU | 8 | 8.49 | 1.09 | |
+
+Accuracy against PyTorch, on the same input:
+
+| implementation | freq_output | time_output |
+| --- | ---: | ---: |
+| Rust port | (end to end) 3.1e-6 | |
+| ONNX Runtime | 5.6e-4 | 5.0e-5 |
+
+Two things follow.
+
+**Smaller: yes.** The Rust artifact is a 987 KB binary with no ONNX Runtime
+(58.4 MB here, ~15–20 MB for the shared library alone). The f32 weights are
+168 MB either way, so the honest total is 987 KB + weights against 174.3 MB +
+58.4 MB. An f16 bundle halves our weights, matching the device.
+
+**Faster: no, not yet.** We are 17× slower than ONNX Runtime on one thread
+and 40× slower than the 8-thread run. Nothing is SIMD, nothing is threaded,
+and the attention materialises its score matrix. The port is also *more*
+accurate than the ONNX export relative to PyTorch (3e-6 against 5.6e-4),
+which suggests the export is folding constants more aggressively.
+
+**The larger finding stands.** EnCodec's ECDC runs at RTF 0.04 on Lambda
 because its kernel is small and hand-optimised. HTDemucs is a ~42 M-parameter
-transformer; even a good CPU implementation lands near RTF 1 on many cores.
-So cloud stem separation is **not** obviously the same win as cloud ECDC, and
-the streaming-stems idea inherits that cost. The bench exists to make this
+transformer; even optimised CPU implementations land near RTF ~1 on many
+cores. Cloud stem separation is **not** obviously the same win as cloud ECDC,
+and streaming stems inherits that cost. The bench exists to make this
 measurable before more is built on the assumption.
 
 Next: SIMD and threading for the hot ops (conv2d, attention matmuls, the
-FFN), then the arm64 measurement that decides cloud versus phone.
+FFN), then the arm64/Graviton measurement that decides cloud versus phone.
