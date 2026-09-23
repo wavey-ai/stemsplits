@@ -7,4 +7,8 @@
 *.safetensors
 /tools/**/out
 /tools/**/downloads
+/tools/**/.venv
+/tools/**/.venv-ct
+__pycache__
+*.pyc
 .DS_Store

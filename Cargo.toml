@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/stemsplits-stft",
     "crates/stemsplits-demucs",
+    "crates/stemsplits-model",
 ]
 
 [workspace.package]

@@ -32,11 +32,22 @@ The plan is portable Rust first, then kernels for the hot ops.
 crates/
   stemsplits-stft/    the STFT/iSTFT contract, ported from StemSeparator.swift
   stemsplits-demucs/  StemKind, the chunk plan, and the overlap-add seam
+  stemsplits-model/   the weight bundle format and loader
 tools/
   oracle-stft/        the Swift/vDSP oracle and its golden vectors
-  reference/          the PyTorch/ONNX reference used only to check parity
+  reference/          the PyTorch reference, the pinned config, and the export
 bench/                real-time-factor and memory benchmarks
 ```
+
+## The model
+
+The on-device model is `htdemucs` (Demucs v4, checkpoint `955717e8`), the
+MIT-licensed 4-stem hybrid transformer: a 48-channel convolutional encoder and
+decoder over both a spectrogram branch (complex-as-channels) and a waveform
+branch, joined by a 5-layer cross-domain transformer at 512 channels. The
+Core ML package Wavey downloads is that same graph stored in **f16**; the
+PyTorch checkpoint is the structured source of the weights and the oracle for
+activations. The config is pinned in `tools/reference/demucs_config.json`.
 
 ## Status
 
@@ -46,11 +57,15 @@ Done:
   rounding, proven against a golden vector (`cargo test`).
 - The Demucs seam (chunk plan + triangular overlap-add) is pinned and tested,
   including that streaming flush equals batch flush.
+- The weight bundle is defined, exported from PyTorch (533 tensors, 41.98 M
+  parameters), and loadable in Rust by the reference's own tensor names.
+- The reference harness runs HTDemucs on a fixed segment and dumps the stems
+  and encoder activations to check a layer port against.
 
 Next:
 
-- Portable Rust forward pass of HTDemucs, weights extracted from the
-  reference, checked against PyTorch.
+- Portable Rust forward pass of HTDemucs, layer by layer, checked against the
+  reference activations and stems.
 - RTF measurement on arm64 (Graviton) to decide whether cloud stems beat the
   phone.
 - A segment API and fan-out, mirroring `bench/ecdc/aws`.
