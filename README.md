@@ -61,11 +61,12 @@ Done:
   parameters), and loadable in Rust by the reference's own tensor names.
 - The reference harness runs HTDemucs on a fixed segment and dumps the stems
   and encoder activations to check a layer port against.
+- The Rust encoder stack (both branches) matches the reference to ~2e-6.
 
 Next:
 
-- Portable Rust forward pass of HTDemucs, layer by layer, checked against the
-  reference activations and stems.
+- The cross-transformer, then the decoder, then the full segment in Rust,
+  layer by layer, checked against the reference activations and stems.
 - RTF measurement on arm64 (Graviton) to decide whether cloud stems beat the
   phone.
 - A segment API and fan-out, mirroring `bench/ecdc/aws`.

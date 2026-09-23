@@ -129,5 +129,23 @@ cloud stems beat the phone (see `bench/README.md`).
 
 ### Status
 
-Done: STFT contract, seam, weight bundle and loader, reference harness.
-Next: the portable Rust forward pass, encoder stack first.
+Done: STFT contract, seam, weight bundle and loader, reference harness, and
+the full encoder stack in both branches.
+
+The Rust encoder matches the reference to ~2e-6 relative:
+
+```
+encoder.0            5.9e-7
+encoder.0 + freq_emb 4.9e-7
+encoder.3            1.9e-6
+tencoder.0           3.3e-7
+tencoder.3           1.5e-6
+```
+
+`crates/stemsplits-htdemucs` holds `tensor`, `ops` (conv1d/conv2d, GroupNorm,
+LayerNorm, Linear, GELU, GLU, LayerScale), `dconv`, and `encoder`. The
+activation tests are ignored by default (they need the 168 MB export) and run
+with `cargo test --release -p stemsplits-htdemucs -- --ignored --nocapture`.
+
+Next: the cross-transformer — positional embeddings, multi-head attention,
+`norm_out` — then the decoder and the full segment.

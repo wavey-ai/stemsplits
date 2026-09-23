@@ -75,6 +75,10 @@ def main() -> None:
             "encoder.1",
             "encoder.2",
             "encoder.3",
+            "tencoder.0",
+            "tencoder.1",
+            "tencoder.2",
+            "tencoder.3",
             "crosstransformer",
             "decoder.0",
             "decoder.1",
@@ -84,7 +88,7 @@ def main() -> None:
             "channel_upsampler_t",
         }:
             module.register_forward_hook(hook(name))
-        if name in {"encoder.0", "crosstransformer"}:
+        if name.startswith("encoder.") or name.startswith("tencoder."):
             module.register_forward_pre_hook(pre_hook(f"input_{name}"))
 
     with torch.no_grad():
