@@ -13,3 +13,6 @@ __pycache__
 *.pyc
 .DS_Store
 /tools/reference/out/htdemucs.onnx
+
+# Sample stems: regenerable, and the source track has its own rights.
+/samples/**/*.wav

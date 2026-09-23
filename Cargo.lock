@@ -316,6 +316,7 @@ dependencies = [
  "cc",
  "libm",
  "serde_json",
+ "stemsplits-demucs",
  "stemsplits-model",
  "stemsplits-stft",
 ]

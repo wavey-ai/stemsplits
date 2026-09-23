@@ -10,5 +10,7 @@ pub mod encoder;
 pub mod matmul;
 pub mod model;
 pub mod ops;
+pub mod separate;
 pub mod tensor;
 pub mod transformer;
+pub mod wav;

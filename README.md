@@ -70,6 +70,16 @@ Next: the arm64/Graviton measurement that decides cloud versus phone, f16
 weights, a segment API and fan-out mirroring `bench/ecdc/aws`, and threading
 once a multi-vCPU function is chosen (a 1769 MB Lambda provides one vCPU).
 
+## Separate a track
+
+```sh
+cargo run --release -p stemsplits-htdemucs --bin separate -- <in.wav> <out-dir>
+```
+
+Input is 44.1 kHz stereo (prepare with `ffmpeg -ar 44100 -ac 2 -c:a pcm_s16le`);
+output is four stem WAVs. It runs the whole track through the pinned chunk
+plan and overlap-add seam. Sample output is described in `samples/README.md`.
+
 ## Build and test
 
 Requires a Rust toolchain and a C compiler (for the GEMM kernel).
