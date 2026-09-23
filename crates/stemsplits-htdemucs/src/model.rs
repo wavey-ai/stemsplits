@@ -120,8 +120,18 @@ impl HtDemucs {
     /// `magnitude` is `[B, 4, Fr, T]` (CaC), `waveform` is `[B, 2, N]`.
     /// Returns `(freq [B, 16, Fr, T], time [B, 8, N])`, both denormalised.
     pub fn forward(&self, magnitude: &Tensor, waveform: &Tensor) -> (Tensor, Tensor) {
+        let profile = std::env::var_os("STEMSPLITS_PROFILE").is_some();
+        let mut mark = std::time::Instant::now();
+        let mut lap = |name: &str| {
+            if profile {
+                eprintln!("  {name}: {:.1} ms", mark.elapsed().as_secs_f64() * 1e3);
+                mark = std::time::Instant::now();
+            }
+        };
+
         let (mut x, mean, std) = normalise(magnitude);
         let (mut xt, mean_t, std_t) = normalise(waveform);
+        lap("normalise");
 
         let mut saved = Vec::new();
         let mut saved_t = Vec::new();
@@ -139,10 +149,12 @@ impl HtDemucs {
             }
             saved.push(x.clone());
         }
+        lap("encode");
 
         x = upsample(&self.channel_upsampler, &x);
         xt = self.channel_upsampler_t.forward(&xt);
         let (transformed_x, transformed_t) = self.transformer.forward(&x, &xt);
+        lap("transformer");
         let mut x = downsample(&self.channel_downsampler, &transformed_x);
         let mut xt = self.channel_downsampler_t.forward(&transformed_t);
         for index in 0..self.decoders.len() {
@@ -153,6 +165,7 @@ impl HtDemucs {
             let length_t = lengths_t.pop().expect("time length");
             xt = self.tdecoders[index].forward(&xt, &skip_t, length_t);
         }
+        lap("decode");
 
         (denormalise(&x, mean, std), denormalise(&xt, mean_t, std_t))
     }

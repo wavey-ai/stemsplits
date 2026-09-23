@@ -61,13 +61,15 @@ Done:
   parameters), and loadable in Rust by the reference's own tensor names.
 - The reference harness runs HTDemucs on a fixed segment and dumps the stems
   and encoder activations to check a layer port against.
-- The Rust encoder stack (both branches) and the cross-transformer match the
-  reference to ~2e-6.
+- The full forward pass matches the reference stems to 3e-6.
+- The single-threaded kernel pass brings one 7.8 s segment to **RTF 1.61**,
+  faster than ONNX Runtime on one thread (2.61) and near its eight-thread run
+  (1.13). The GEMM is C with AVX2/FMA or NEON, as in `encodec-rs`.
 
 Next:
 
-- The decoder, then the full segment in Rust, checked against the reference
-  activations and stems.
+- The arm64/Graviton measurement that decides cloud versus phone, then f16
+  weights, then threading (only if a multi-vCPU function is chosen).
 - RTF measurement on arm64 (Graviton) to decide whether cloud stems beat the
   phone.
 - A segment API and fan-out, mirroring `bench/ecdc/aws`.

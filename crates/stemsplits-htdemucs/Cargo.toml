@@ -12,5 +12,8 @@ stemsplits-stft = { path = "../stemsplits-stft" }
 anyhow.workspace = true
 libm = "0.2"
 
+[build-dependencies]
+cc = "1"
+
 [dev-dependencies]
 serde_json.workspace = true

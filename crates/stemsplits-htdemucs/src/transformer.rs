@@ -283,51 +283,90 @@ fn attention(
         let b = &weights.in_proj_bias[offset * dim..(offset + 1) * dim];
         linear(x, w, b).data
     };
-    let q_proj = project(q, 0);
-    let k_proj = project(k, 1);
-    let v_proj = project(v, 2);
+    // Head-major, so each head's queries and keys are contiguous.
+    let mut q_proj = to_heads(&project(q, 0), batch, queries, dim, heads);
+    let k_proj = to_heads(&project(k, 1), batch, keys, dim, heads);
+    let v_proj = to_heads(&project(v, 2), batch, keys, dim, heads);
+    // The reference scales the queries once: `q / sqrt(head_dim)`.
+    for value in q_proj.iter_mut() {
+        *value *= scale;
+    }
 
-    let mut output = vec![0.0f32; batch * queries * dim];
+    let mut head_output = vec![0.0f32; batch * heads * queries * head_dim];
     let mut scores = vec![0.0f32; queries * keys];
+    for head in 0..batch * heads {
+        let q_head = &q_proj[head * queries * head_dim..(head + 1) * queries * head_dim];
+        let k_head = &k_proj[head * keys * head_dim..(head + 1) * keys * head_dim];
+        let v_head = &v_proj[head * keys * head_dim..(head + 1) * keys * head_dim];
+        let out = &mut head_output[head * queries * head_dim..(head + 1) * queries * head_dim];
+
+        // Transpose the keys so the scores matmul is the vectorisable form.
+        let mut keys_transposed = vec![0.0f32; head_dim * keys];
+        for key in 0..keys {
+            for d in 0..head_dim {
+                keys_transposed[d * keys + key] = k_head[key * head_dim + d];
+            }
+        }
+        crate::matmul::matmul(
+            q_head,
+            &keys_transposed,
+            &mut scores,
+            queries,
+            head_dim,
+            keys,
+        );
+        for query in 0..queries {
+            let row = &mut scores[query * keys..(query + 1) * keys];
+            let maximum = row.iter().copied().fold(f32::MIN, f32::max);
+            let mut sum = 0.0f32;
+            for value in row.iter_mut() {
+                *value = (*value - maximum).exp();
+                sum += *value;
+            }
+            for value in row.iter_mut() {
+                *value /= sum;
+            }
+        }
+        crate::matmul::matmul(&scores, v_head, out, queries, keys, head_dim);
+    }
+
+    let merged = from_heads(&head_output, batch, heads, queries, head_dim);
+    let attended = Tensor::new(vec![batch, queries, dim], merged);
+    linear(&attended, &weights.out_proj_weight, &weights.out_proj_bias)
+}
+
+/// `[B, T, C]` -> `[B * H, T, D]`, head-major and contiguous.
+fn to_heads(x: &[f32], batch: usize, time: usize, dim: usize, heads: usize) -> Vec<f32> {
+    let head_dim = dim / heads;
+    let mut output = vec![0.0f32; batch * heads * time * head_dim];
     for b in 0..batch {
         for head in 0..heads {
-            // scores[tq, tk] = (q . k) / sqrt(head_dim)
-            for tq in 0..queries {
-                let q_base = ((b * queries + tq) * dim) + head * head_dim;
-                for tk in 0..keys {
-                    let k_base = ((b * keys + tk) * dim) + head * head_dim;
-                    let mut dot = 0.0f32;
-                    for d in 0..head_dim {
-                        dot += q_proj[q_base + d] * k_proj[k_base + d];
-                    }
-                    scores[tq * keys + tk] = dot * scale;
-                }
-                // softmax over keys
-                let row = &mut scores[tq * keys..(tq + 1) * keys];
-                let maximum = row.iter().copied().fold(f32::MIN, f32::max);
-                let mut sum = 0.0f32;
-                for value in row.iter_mut() {
-                    *value = (*value - maximum).exp();
-                    sum += *value;
-                }
-                for value in row.iter_mut() {
-                    *value /= sum;
-                }
-                for d in 0..head_dim {
-                    let mut sum = 0.0f32;
-                    for tk in 0..keys {
-                        sum += scores[tq * keys + tk]
-                            * v_proj[((b * keys + tk) * dim) + head * head_dim + d];
-                    }
-                    output[((b * queries + tq) * dim) + head * head_dim + d] = sum;
-                }
+            for t in 0..time {
+                let source = (b * time + t) * dim + head * head_dim;
+                let destination = ((b * heads + head) * time + t) * head_dim;
+                output[destination..destination + head_dim]
+                    .copy_from_slice(&x[source..source + head_dim]);
             }
         }
     }
+    output
+}
 
-    let shape = q.shape.clone();
-    let attended = Tensor::new(shape, output);
-    linear(&attended, &weights.out_proj_weight, &weights.out_proj_bias)
+/// `[B * H, T, D]` -> `[B, T, C]`.
+fn from_heads(x: &[f32], batch: usize, heads: usize, time: usize, head_dim: usize) -> Vec<f32> {
+    let dim = heads * head_dim;
+    let mut output = vec![0.0f32; batch * time * dim];
+    for b in 0..batch {
+        for head in 0..heads {
+            for t in 0..time {
+                let source = ((b * heads + head) * time + t) * head_dim;
+                let destination = (b * time + t) * dim + head * head_dim;
+                output[destination..destination + head_dim]
+                    .copy_from_slice(&x[source..source + head_dim]);
+            }
+        }
+    }
+    output
 }
 
 fn feed_forward(x: &Tensor, ff: &FeedForward) -> Tensor {

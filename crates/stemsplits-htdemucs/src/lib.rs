@@ -7,6 +7,7 @@
 pub mod dconv;
 pub mod decoder;
 pub mod encoder;
+pub mod matmul;
 pub mod model;
 pub mod ops;
 pub mod tensor;

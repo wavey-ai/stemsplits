@@ -36,7 +36,11 @@ fn main() {
         .unwrap_or(3);
 
     let weights = Weights::open(Path::new(&bundle)).expect("bundle");
-    println!("parameters: {}", weights.parameter_count());
+    println!(
+        "parameters: {}, threads: {}",
+        weights.parameter_count(),
+        stemsplits_htdemucs::matmul::thread_count()
+    );
     let model = HtDemucs::load(&weights).expect("model");
 
     let geometry = Geometry::CONTRACT;

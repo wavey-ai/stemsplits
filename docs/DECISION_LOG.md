@@ -213,5 +213,33 @@ cores. Cloud stem separation is **not** obviously the same win as cloud ECDC,
 and streaming stems inherits that cost. The bench exists to make this
 measurable before more is built on the assumption.
 
-Next: SIMD and threading for the hot ops (conv2d, attention matmuls, the
-FFN), then the arm64/Graviton measurement that decides cloud versus phone.
+### The kernel pass: single-threaded, to RTF 1.6
+
+Threading is deferred: a Lambda at 1769 MB gets a single vCPU, so it would
+only pay on a larger function. The work went into the single-threaded
+kernels instead, each step measured with `bench`:
+
+| change | RTF |
+| --- | ---: |
+| naive scalar | 44.0 |
+| blocked matmul, four independent accumulation chains | 20.7 |
+| conv2d as im2col + matmul (the decoder's 3x3 rewrites were ~28 GFLOP of serial accumulation) | 13.9 |
+| conv_transpose1d/2d as matmul + scatter | 7.65 |
+| `Linear` transposes its weight so the matmul's inner loop is the vectorisable one | 3.28 |
+| C NEON micro-kernel, four rows × one vector, k innermost | 2.26 |
+| micro-kernel widened to eight columns with `vmlaq_n_f32` | **1.61** |
+
+The lesson repeated from `encodec-rs`: **the Rust scalar loop does not
+vectorise.** A reduction cannot be reassociated without changing the result,
+and the compiler will not do it, so neither blocking nor `target-cpu=native`
+helped until the SIMD was explicit. The C kernel (`kernels/gemm.c`) is
+compiled by `build.rs` with AVX2/FMA on x86 and NEON on aarch64; its
+per-output accumulation order is unchanged, so only FMA contraction moves the
+result, inside the parity tolerance (stems stay at 2.99e-6 against PyTorch).
+
+At RTF 1.61 the port is now faster than ONNX Runtime on one thread (2.61) and
+close to ONNX Runtime on eight (1.13) and PyTorch on eight (1.09), while
+single-threaded. The artifact remains a ~1 MB binary with no ONNX Runtime.
+
+Next: the arm64/Graviton measurement that decides cloud versus phone, then
+f16 weights, then threading (only if a multi-vCPU function is chosen).
