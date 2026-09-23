@@ -147,5 +147,16 @@ LayerNorm, Linear, GELU, GLU, LayerScale), `dconv`, and `encoder`. The
 activation tests are ignored by default (they need the 168 MB export) and run
 with `cargo test --release -p stemsplits-htdemucs -- --ignored --nocapture`.
 
-Next: the cross-transformer — positional embeddings, multi-head attention,
-`norm_out` — then the decoder and the full segment.
+The cross-transformer also matches:
+
+```
+crosstransformer.x  2.2e-6
+crosstransformer.t  2.6e-6
+```
+
+`transformer.rs` holds the 2D/1D sinusoidal positional embeddings, multi-head
+attention (self on layers 0/2/4, cross on 1/3), LayerNorm, LayerScale
+(channel-last) and the `MyGroupNorm` `norm_out`.
+
+Next: the decoder — `conv_transpose2d`, skip connections, the final CaC
+reshape — then the full segment.

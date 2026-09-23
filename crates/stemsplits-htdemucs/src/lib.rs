@@ -8,3 +8,4 @@ pub mod dconv;
 pub mod encoder;
 pub mod ops;
 pub mod tensor;
+pub mod transformer;

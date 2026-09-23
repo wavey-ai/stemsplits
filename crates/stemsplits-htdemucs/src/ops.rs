@@ -101,6 +101,41 @@ pub fn group_norm(x: &Tensor, groups: usize, weight: &[f32], bias: &[f32], eps: 
     output
 }
 
+/// `MyGroupNorm(1, channels)` on a `[B, T, C]` sequence: transpose to
+/// `[B, C, T]`, normalise over all channels and time per sample, scale per
+/// channel, transpose back. The transformer's `norm_out` is this.
+pub fn group_norm_sequence(x: &Tensor, weight: &[f32], bias: &[f32], eps: f32) -> Tensor {
+    let batch = x.dim(0);
+    let time = x.dim(1);
+    let channels = x.dim(2);
+    assert_eq!(weight.len(), channels);
+    let count = (time * channels) as f64;
+    let mut output = x.clone();
+    for index in 0..batch {
+        let base = index * time * channels;
+        let mut sum = 0.0f64;
+        for offset in 0..(time * channels) {
+            sum += x.data[base + offset] as f64;
+        }
+        let mean = sum / count;
+        let mut variance = 0.0f64;
+        for offset in 0..(time * channels) {
+            let delta = x.data[base + offset] as f64 - mean;
+            variance += delta * delta;
+        }
+        variance /= count;
+        let inverse = 1.0 / ((variance as f32) + eps).sqrt();
+        for t in 0..time {
+            for c in 0..channels {
+                let offset = base + t * channels + c;
+                let normalised = (x.data[offset] - mean as f32) * inverse;
+                output.data[offset] = normalised * weight[c] + bias[c];
+            }
+        }
+    }
+    output
+}
+
 /// `nn.LayerNorm` over the last axis, with affine weight and bias.
 pub fn layer_norm(x: &Tensor, weight: &[f32], bias: &[f32], eps: f32) -> Tensor {
     let features = *x.shape.last().unwrap();
@@ -154,7 +189,23 @@ pub fn linear(x: &Tensor, weight: &[f32], bias: &[f32]) -> Tensor {
     output
 }
 
-/// LayerScale (`channel_last = True`): one learned multiplier per channel.
+/// LayerScale with `channel_last = True`: `x` is `[B, T, C]` and the scale
+/// multiplies the last axis. The transformer's gamma uses this form.
+pub fn layer_scale_last(x: &Tensor, scale: &[f32]) -> Tensor {
+    let channels = *x.shape.last().unwrap();
+    assert_eq!(scale.len(), channels);
+    let rows = x.numel() / channels;
+    let mut output = x.clone();
+    for row in 0..rows {
+        for channel in 0..channels {
+            output.data[row * channels + channel] *= scale[channel];
+        }
+    }
+    output
+}
+
+/// LayerScale with `channel_last = False`: `x` is `[B, C, ...]` and the scale
+/// multiplies the second axis. DConv uses this form.
 pub fn layer_scale(x: &Tensor, scale: &[f32]) -> Tensor {
     let channels = x.dim(1);
     assert_eq!(scale.len(), channels);

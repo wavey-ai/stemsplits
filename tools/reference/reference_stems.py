@@ -69,6 +69,13 @@ def main() -> None:
             captured[name] = inputs[0].detach().cpu().numpy()
         return run
 
+    def transformer_hook(_module, inputs, output):
+        # The cross-transformer takes (x, xt) and returns (x, xt).
+        captured["input_crosstransformer_x"] = inputs[0].detach().cpu().numpy()
+        captured["input_crosstransformer_t"] = inputs[1].detach().cpu().numpy()
+        captured["crosstransformer_x"] = output[0].detach().cpu().numpy()
+        captured["crosstransformer_t"] = output[1].detach().cpu().numpy()
+
     for name, module in model.named_modules():
         if name in {
             "encoder.0",
@@ -90,6 +97,8 @@ def main() -> None:
             module.register_forward_hook(hook(name))
         if name.startswith("encoder.") or name.startswith("tencoder."):
             module.register_forward_pre_hook(pre_hook(f"input_{name}"))
+        if name == "crosstransformer":
+            module.register_forward_hook(transformer_hook)
 
     with torch.no_grad():
         stems = model(mix)  # [1, 4, 2, N]
