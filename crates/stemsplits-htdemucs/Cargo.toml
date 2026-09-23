@@ -8,9 +8,9 @@ description = "Portable Rust HTDemucs forward pass"
 
 [dependencies]
 stemsplits-model = { path = "../stemsplits-model" }
+stemsplits-stft = { path = "../stemsplits-stft" }
 anyhow.workspace = true
 libm = "0.2"
 
 [dev-dependencies]
-stemsplits-stft = { path = "../stemsplits-stft" }
 serde_json.workspace = true

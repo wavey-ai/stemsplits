@@ -55,6 +55,11 @@ def main() -> None:
     index: dict = {}
     write("input", mix.numpy(), out, index)
 
+    # The CaC magnitude, which is the model's `spectral_magnitude` input and
+    # what the Rust STFT front end must produce.
+    with torch.no_grad():
+        write("mag", model._magnitude(model._spec(mix)).numpy(), out, index)
+
     # Capture the named tensors a layer port needs to be checked against.
     captured: dict[str, np.ndarray] = {}
 
@@ -75,6 +80,16 @@ def main() -> None:
         captured["input_crosstransformer_t"] = inputs[1].detach().cpu().numpy()
         captured["crosstransformer_x"] = output[0].detach().cpu().numpy()
         captured["crosstransformer_t"] = output[1].detach().cpu().numpy()
+
+    def decoder_hook(name):
+        # HDecLayer takes (x, skip, length) and returns (z, y).
+        def run(_module, inputs, output):
+            captured[f"input_{name}_x"] = inputs[0].detach().cpu().numpy()
+            if inputs[1] is not None:
+                captured[f"input_{name}_skip"] = inputs[1].detach().cpu().numpy()
+            captured[f"{name}_z"] = output[0].detach().cpu().numpy()
+            captured[f"{name}_y"] = output[1].detach().cpu().numpy()
+        return run
 
     for name, module in model.named_modules():
         if name in {
@@ -99,6 +114,10 @@ def main() -> None:
             module.register_forward_pre_hook(pre_hook(f"input_{name}"))
         if name == "crosstransformer":
             module.register_forward_hook(transformer_hook)
+        if name.count(".") == 1 and (
+            name.startswith("decoder.") or name.startswith("tdecoder.")
+        ):
+            module.register_forward_hook(decoder_hook(name.replace(".", "_")))
 
     with torch.no_grad():
         stems = model(mix)  # [1, 4, 2, N]

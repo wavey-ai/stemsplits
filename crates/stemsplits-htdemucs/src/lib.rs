@@ -5,7 +5,9 @@
 //! Scalar and obvious first; SIMD kernels come later for the hot ops.
 
 pub mod dconv;
+pub mod decoder;
 pub mod encoder;
+pub mod model;
 pub mod ops;
 pub mod tensor;
 pub mod transformer;

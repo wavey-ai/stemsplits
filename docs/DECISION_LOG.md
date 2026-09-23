@@ -158,5 +158,34 @@ crosstransformer.t  2.6e-6
 attention (self on layers 0/2/4, cross on 1/3), LayerNorm, LayerScale
 (channel-last) and the `MyGroupNorm` `norm_out`.
 
-Next: the decoder — `conv_transpose2d`, skip connections, the final CaC
-reshape — then the full segment.
+The decoder and the full pass also match:
+
+```
+decoder.0           1.9e-6
+tdecoder.0          1.0e-6
+stems (end to end)  3.1e-6
+```
+
+`decoder.rs` adds `conv_transpose1d/2d`, the skip add, the rewrite GLU, the
+DConv residual and the frequency/time crops. `model.rs` assembles the whole
+pass and does the per-sample mean/std normalisation the Core ML graph bakes
+in. The end-to-end test feeds the raw CaC magnitude and waveform, runs the
+model, and reconstructs stems with `stemsplits-stft`, matching PyTorch.
+
+### The first benchmark: the naive port is slow, and that is the finding
+
+`cargo run --release -p stemsplits-htdemucs --bin bench` times one 7.8 s
+segment. The scalar first pass is **343 s, RTF 44**, against PyTorch CPU's
+**8.49 s, RTF 1.09** on 8 threads. We are ~40× slower than the reference
+today; nothing is SIMD, nothing is threaded, and the attention materialises
+its score matrix.
+
+This matters beyond the port. EnCodec's ECDC runs at RTF 0.04 on Lambda
+because its kernel is small and hand-optimised. HTDemucs is a ~42 M-parameter
+transformer; even a good CPU implementation lands near RTF 1 on many cores.
+So cloud stem separation is **not** obviously the same win as cloud ECDC, and
+the streaming-stems idea inherits that cost. The bench exists to make this
+measurable before more is built on the assumption.
+
+Next: SIMD and threading for the hot ops (conv2d, attention matmuls, the
+FFN), then the arm64 measurement that decides cloud versus phone.

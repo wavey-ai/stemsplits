@@ -335,6 +335,97 @@ pub fn conv2d(
     output
 }
 
+/// `nn.ConvTranspose1d` over `[N, C, T]`. Weight is `[Cin, Cout, kernel]`.
+pub fn conv_transpose1d(
+    x: &Tensor,
+    weight: &[f32],
+    bias: &[f32],
+    out_channels: usize,
+    kernel: usize,
+    stride: usize,
+) -> Tensor {
+    let batch = x.dim(0);
+    let in_channels = x.dim(1);
+    let time = x.dim(2);
+    let out_time = (time - 1) * stride + kernel;
+    let mut output = Tensor::zeros(vec![batch, out_channels, out_time]);
+    for index in 0..batch {
+        for channel in 0..out_channels {
+            let base = (index * out_channels + channel) * out_time;
+            for position in 0..out_time {
+                output.data[base + position] = bias[channel];
+            }
+        }
+        for input_channel in 0..in_channels {
+            for position in 0..time {
+                let value = x.data[(index * in_channels + input_channel) * time + position];
+                for channel in 0..out_channels {
+                    for tap in 0..kernel {
+                        let out = position * stride + tap;
+                        output.data[(index * out_channels + channel) * out_time + out] +=
+                            value * weight[(input_channel * out_channels + channel) * kernel + tap];
+                    }
+                }
+            }
+        }
+    }
+    output
+}
+
+/// `nn.ConvTranspose2d` over `[N, C, H, W]`, no padding. Weight is
+/// `[Cin, Cout, kH, kW]`.
+pub fn conv_transpose2d(
+    x: &Tensor,
+    weight: &[f32],
+    bias: &[f32],
+    out_channels: usize,
+    kernel: (usize, usize),
+    stride: (usize, usize),
+) -> Tensor {
+    let batch = x.dim(0);
+    let in_channels = x.dim(1);
+    let height = x.dim(2);
+    let width = x.dim(3);
+    let (kernel_h, kernel_w) = kernel;
+    let (stride_h, stride_w) = stride;
+    let out_height = (height - 1) * stride_h + kernel_h;
+    let out_width = (width - 1) * stride_w + kernel_w;
+    let mut output = Tensor::zeros(vec![batch, out_channels, out_height, out_width]);
+    for index in 0..batch {
+        for channel in 0..out_channels {
+            let base = (index * out_channels + channel) * out_height * out_width;
+            for position in 0..(out_height * out_width) {
+                output.data[base + position] = bias[channel];
+            }
+        }
+        for input_channel in 0..in_channels {
+            for row in 0..height {
+                for column in 0..width {
+                    let value = x.data
+                        [((index * in_channels + input_channel) * height + row) * width + column];
+                    for channel in 0..out_channels {
+                        for tap_h in 0..kernel_h {
+                            let out_row = row * stride_h + tap_h;
+                            for tap_w in 0..kernel_w {
+                                let out_column = column * stride_w + tap_w;
+                                output.data[((index * out_channels + channel) * out_height
+                                    + out_row)
+                                    * out_width
+                                    + out_column] += value
+                                    * weight[((input_channel * out_channels + channel) * kernel_h
+                                        + tap_h)
+                                        * kernel_w
+                                        + tap_w];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
