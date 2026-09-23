@@ -64,6 +64,11 @@ def main() -> None:
                 captured[name] = output.detach().cpu().numpy()
         return run
 
+    def pre_hook(name):
+        def run(_module, inputs):
+            captured[name] = inputs[0].detach().cpu().numpy()
+        return run
+
     for name, module in model.named_modules():
         if name in {
             "encoder.0",
@@ -79,6 +84,8 @@ def main() -> None:
             "channel_upsampler_t",
         }:
             module.register_forward_hook(hook(name))
+        if name in {"encoder.0", "crosstransformer"}:
+            module.register_forward_pre_hook(pre_hook(f"input_{name}"))
 
     with torch.no_grad():
         stems = model(mix)  # [1, 4, 2, N]
