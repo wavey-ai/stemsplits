@@ -146,6 +146,7 @@ pub fn forward(
     assert_eq!(window.len(), geometry.fft_size, "window length");
     let padded = reflect_pad(signal, geometry.pad_left(), geometry.pad_right());
     let fft = planner.plan_fft_forward(geometry.fft_size);
+    let mut scratch = vec![Complex::new(0.0f32, 0.0); fft.get_inplace_scratch_len()];
     let mut buffer = vec![Complex::new(0.0f32, 0.0); geometry.fft_size];
     let plane = geometry.bins * geometry.frames;
     let mut real = vec![0.0f32; plane];
@@ -155,7 +156,7 @@ pub fn forward(
         for sample in 0..geometry.fft_size {
             buffer[sample] = Complex::new(padded[start + sample] * window[sample], 0.0);
         }
-        fft.process(&mut buffer);
+        fft.process_with_scratch(&mut buffer, &mut scratch);
         for (bin, value) in buffer.iter().enumerate().take(geometry.bins) {
             let index = bin * geometry.frames + frame;
             real[index] = value.re;
@@ -208,6 +209,7 @@ pub fn inverse(
     let mut output = vec![0.0f32; raw_len];
     let mut weights = vec![0.0f32; raw_len];
     let fft = planner.plan_fft_inverse(geometry.fft_size);
+    let mut scratch = vec![Complex::new(0.0f32, 0.0); fft.get_inplace_scratch_len()];
     let mut buffer = vec![Complex::new(0.0f32, 0.0); geometry.fft_size];
     let normalise = 1.0 / geometry.fft_size as f32;
 
@@ -227,7 +229,7 @@ pub fn inverse(
                 buffer[geometry.fft_size - bin] = value.conj();
             }
         }
-        fft.process(&mut buffer);
+        fft.process_with_scratch(&mut buffer, &mut scratch);
         let start = frame * geometry.hop_size;
         for sample in 0..geometry.fft_size {
             let value = buffer[sample].re * normalise * window[sample];

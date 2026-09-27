@@ -123,6 +123,7 @@ pub struct OverlapAdd {
     values: Vec<f64>,
     weights: Vec<f64>,
     flushed: usize,
+    base: usize,
 }
 
 impl OverlapAdd {
@@ -140,6 +141,9 @@ impl OverlapAdd {
     /// Adds one segment's contribution at `offset`.
     pub fn add(&mut self, offset: usize, segment: &[f32], window: &[f32]) {
         assert_eq!(segment.len(), window.len(), "segment and window length");
+        let offset = offset
+            .checked_sub(self.base)
+            .expect("segment precedes retained samples");
         self.grow(offset + segment.len());
         for (index, (sample, weight)) in segment.iter().zip(window).enumerate() {
             // The Demucs seam weights the contribution and the normaliser by
@@ -152,7 +156,10 @@ impl OverlapAdd {
 
     /// Every sample before `frame` is final; returns them normalised.
     pub fn flush_until(&mut self, frame: usize) -> Vec<f32> {
-        let frame = frame.min(self.values.len());
+        let frame = frame
+            .saturating_sub(self.base)
+            .min(self.values.len())
+            .max(self.flushed);
         let output = (self.flushed..frame)
             .map(|index| {
                 let weight = self.weights[index];
@@ -169,8 +176,20 @@ impl OverlapAdd {
 
     /// The remaining samples, after the last segment has landed.
     pub fn finish(&mut self) -> Vec<f32> {
-        let end = self.values.len();
+        let end = self.base + self.values.len();
         self.flush_until(end)
+    }
+
+    /// Release final samples. Future segments must start at or after the retained range.
+    pub fn discard_flushed(&mut self) {
+        self.values.drain(..self.flushed);
+        self.weights.drain(..self.flushed);
+        self.base += self.flushed;
+        self.flushed = 0;
+    }
+
+    pub fn retained_frames(&self) -> usize {
+        self.values.len()
     }
 }
 

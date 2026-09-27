@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result};
 
-use crate::ops::{gelu, group_norm_sequence, layer_norm, layer_scale_last, linear};
+use crate::ops::{gelu, group_norm_sequence, layer_norm, layer_scale_last, Linear};
 use crate::tensor::Tensor;
 use stemsplits_model::Weights;
 
@@ -18,17 +18,15 @@ const LAYER_NORM_EPS: f32 = 1e-5;
 const NORM_OUT_EPS: f32 = 1e-5;
 
 struct AttentionWeights {
-    in_proj_weight: Vec<f32>,
-    in_proj_bias: Vec<f32>,
-    out_proj_weight: Vec<f32>,
-    out_proj_bias: Vec<f32>,
+    query: Linear,
+    key: Linear,
+    value: Linear,
+    output: Linear,
 }
 
 struct FeedForward {
-    linear1_weight: Vec<f32>,
-    linear1_bias: Vec<f32>,
-    linear2_weight: Vec<f32>,
-    linear2_bias: Vec<f32>,
+    linear1: Linear,
+    linear2: Linear,
 }
 
 struct Norms {
@@ -126,20 +124,36 @@ fn load_norms(weights: &Weights, prefix: &str) -> Result<Norms> {
 }
 
 fn load_attention(weights: &Weights, prefix: &str) -> Result<AttentionWeights> {
+    let weight = load(weights, &format!("{prefix}.in_proj_weight"))?;
+    let bias = load(weights, &format!("{prefix}.in_proj_bias"))?;
+    assert_eq!(bias.len() % 3, 0, "attention projection shape");
+    let dim = bias.len() / 3;
+    assert_eq!(weight.len(), 3 * dim * dim, "attention projection weight");
+    let projection = |offset: usize| {
+        Linear::new(
+            &weight[offset * dim * dim..(offset + 1) * dim * dim],
+            bias[offset * dim..(offset + 1) * dim].to_vec(),
+        )
+    };
     Ok(AttentionWeights {
-        in_proj_weight: load(weights, &format!("{prefix}.in_proj_weight"))?,
-        in_proj_bias: load(weights, &format!("{prefix}.in_proj_bias"))?,
-        out_proj_weight: load(weights, &format!("{prefix}.out_proj.weight"))?,
-        out_proj_bias: load(weights, &format!("{prefix}.out_proj.bias"))?,
+        query: projection(0),
+        key: projection(1),
+        value: projection(2),
+        output: load_linear(weights, &format!("{prefix}.out_proj"))?,
     })
+}
+
+fn load_linear(weights: &Weights, prefix: &str) -> Result<Linear> {
+    Ok(Linear::new(
+        &load(weights, &format!("{prefix}.weight"))?,
+        load(weights, &format!("{prefix}.bias"))?,
+    ))
 }
 
 fn load_feed_forward(weights: &Weights, prefix: &str) -> Result<FeedForward> {
     Ok(FeedForward {
-        linear1_weight: load(weights, &format!("{prefix}.linear1.weight"))?,
-        linear1_bias: load(weights, &format!("{prefix}.linear1.bias"))?,
-        linear2_weight: load(weights, &format!("{prefix}.linear2.weight"))?,
-        linear2_bias: load(weights, &format!("{prefix}.linear2.bias"))?,
+        linear1: load_linear(weights, &format!("{prefix}.linear1"))?,
+        linear2: load_linear(weights, &format!("{prefix}.linear2"))?,
     })
 }
 
@@ -277,23 +291,20 @@ fn attention(
     let head_dim = dim / heads;
     let scale = 1.0 / (head_dim as f32).sqrt();
 
-    // in_proj_weight is [3 * dim, dim], split into q, k, v.
-    let project = |x: &Tensor, offset: usize| -> Vec<f32> {
-        let w = &weights.in_proj_weight[offset * dim * dim..(offset + 1) * dim * dim];
-        let b = &weights.in_proj_bias[offset * dim..(offset + 1) * dim];
-        linear(x, w, b).data
-    };
     // Head-major, so each head's queries and keys are contiguous.
-    let mut q_proj = to_heads(&project(q, 0), batch, queries, dim, heads);
-    let k_proj = to_heads(&project(k, 1), batch, keys, dim, heads);
-    let v_proj = to_heads(&project(v, 2), batch, keys, dim, heads);
+    let mut q_proj = to_heads(&weights.query.forward(q).data, batch, queries, dim, heads);
+    let k_proj = to_heads(&weights.key.forward(k).data, batch, keys, dim, heads);
+    let v_proj = to_heads(&weights.value.forward(v).data, batch, keys, dim, heads);
     // The reference scales the queries once: `q / sqrt(head_dim)`.
     for value in q_proj.iter_mut() {
         *value *= scale;
     }
 
     let mut head_output = vec![0.0f32; batch * heads * queries * head_dim];
-    let mut scores = vec![0.0f32; queries * keys];
+    // Multiples of four preserve the GEMM row groups and scalar remainder.
+    const QUERY_TILE: usize = 64;
+    let mut scores = vec![0.0f32; queries.min(QUERY_TILE) * keys];
+    let mut keys_transposed = vec![0.0f32; head_dim * keys];
     for head in 0..batch * heads {
         let q_head = &q_proj[head * queries * head_dim..(head + 1) * queries * head_dim];
         let k_head = &k_proj[head * keys * head_dim..(head + 1) * keys * head_dim];
@@ -301,22 +312,45 @@ fn attention(
         let out = &mut head_output[head * queries * head_dim..(head + 1) * queries * head_dim];
 
         // Transpose the keys so the scores matmul is the vectorisable form.
-        let mut keys_transposed = vec![0.0f32; head_dim * keys];
         for key in 0..keys {
             for d in 0..head_dim {
                 keys_transposed[d * keys + key] = k_head[key * head_dim + d];
             }
         }
-        crate::matmul::matmul(
+        attention_head(
             q_head,
             &keys_transposed,
+            v_head,
+            out,
             &mut scores,
-            queries,
-            head_dim,
             keys,
+            head_dim,
         );
-        for query in 0..queries {
-            let row = &mut scores[query * keys..(query + 1) * keys];
+    }
+
+    let merged = from_heads(&head_output, batch, heads, queries, head_dim);
+    let attended = Tensor::new(vec![batch, queries, dim], merged);
+    weights.output.forward(&attended)
+}
+
+fn attention_head(
+    q: &[f32],
+    keys_transposed: &[f32],
+    v: &[f32],
+    out: &mut [f32],
+    scores: &mut [f32],
+    keys: usize,
+    head_dim: usize,
+) {
+    let rows_per_tile = scores.len() / keys;
+    for (query, output) in q
+        .chunks(rows_per_tile * head_dim)
+        .zip(out.chunks_mut(rows_per_tile * head_dim))
+    {
+        let rows = query.len() / head_dim;
+        let scores = &mut scores[..rows * keys];
+        crate::matmul::matmul(query, keys_transposed, scores, rows, head_dim, keys);
+        for row in scores.chunks_mut(keys) {
             let maximum = row.iter().copied().fold(f32::MIN, f32::max);
             let mut sum = 0.0f32;
             for value in row.iter_mut() {
@@ -327,12 +361,8 @@ fn attention(
                 *value /= sum;
             }
         }
-        crate::matmul::matmul(&scores, v_head, out, queries, keys, head_dim);
+        crate::matmul::matmul(scores, v, output, rows, keys, head_dim);
     }
-
-    let merged = from_heads(&head_output, batch, heads, queries, head_dim);
-    let attended = Tensor::new(vec![batch, queries, dim], merged);
-    linear(&attended, &weights.out_proj_weight, &weights.out_proj_bias)
 }
 
 /// `[B, T, C]` -> `[B * H, T, D]`, head-major and contiguous.
@@ -370,9 +400,9 @@ fn from_heads(x: &[f32], batch: usize, heads: usize, time: usize, head_dim: usiz
 }
 
 fn feed_forward(x: &Tensor, ff: &FeedForward) -> Tensor {
-    let hidden = linear(x, &ff.linear1_weight, &ff.linear1_bias);
+    let hidden = ff.linear1.forward(x);
     let hidden = gelu(&hidden);
-    linear(&hidden, &ff.linear2_weight, &ff.linear2_bias)
+    ff.linear2.forward(&hidden)
 }
 
 fn add(a: &Tensor, b: &Tensor) -> Tensor {
@@ -501,4 +531,58 @@ fn sin_embedding_2d(dim: usize, frequency: usize, time: usize, max_period: f32) 
         }
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::attention_head;
+
+    fn values(count: usize, mut state: u32) -> Vec<f32> {
+        (0..count)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 8) as f32 / 16_777_216.0 - 0.5
+            })
+            .collect()
+    }
+
+    #[test]
+    fn query_tiles_preserve_output_bits_at_tile_and_kernel_boundaries() {
+        for queries in [1, 3, 4, 63, 64, 65, 67, 129] {
+            for keys in [7, 19, 64] {
+                for head_dim in [4, 16, 64] {
+                    let q = values(queries * head_dim, 1);
+                    let k = values(head_dim * keys, 2);
+                    let v = values(keys * head_dim, 3);
+                    let mut expected = vec![0.0; q.len()];
+                    let mut actual = vec![0.0; q.len()];
+                    attention_head(
+                        &q,
+                        &k,
+                        &v,
+                        &mut expected,
+                        &mut vec![0.0; queries * keys],
+                        keys,
+                        head_dim,
+                    );
+                    attention_head(
+                        &q,
+                        &k,
+                        &v,
+                        &mut actual,
+                        &mut vec![0.0; queries.min(64) * keys],
+                        keys,
+                        head_dim,
+                    );
+                    for (index, (a, b)) in actual.iter().zip(&expected).enumerate() {
+                        assert_eq!(
+                            a.to_bits(),
+                            b.to_bits(),
+                            "{queries}/{keys}/{head_dim} at {index}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

@@ -1,0 +1,12 @@
+**/target
+.git
+**/.api-key
+**/.dev.vars
+**/.secrets
+tools/reference/out
+tools/reference/.venv
+tools/reference/.venv-ct
+samples
+bench
+browser
+node_modules

@@ -1,0 +1,14 @@
+[package]
+name = "stemsplits-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+stemsplits-demucs = { path = "../stemsplits-demucs" }
+stemsplits-transport = { path = "../stemsplits-transport" }
+wasm-bindgen = "=0.2.128"
+rubato = "=0.14.1"

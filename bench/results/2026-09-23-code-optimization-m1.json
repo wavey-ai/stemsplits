@@ -1,0 +1,115 @@
+{
+  "date": "2026-09-23",
+  "baseline_revision": "0f384e95f0f2cd745ca51f8f7c0e544fcc019d58",
+  "machine": {
+    "model": "MacBookAir10,1",
+    "cpu": "Apple M1",
+    "memory_bytes": 17179869184,
+    "architecture": "aarch64-apple-darwin"
+  },
+  "model": {
+    "name": "htdemucs",
+    "checkpoint": "955717e8-8726e21a",
+    "precision": "f32",
+    "weights_sha256": "f75e71069593dc51953fb319478efc51bcccf9727f050d6b519f92a8297c04c8"
+  },
+  "plan": {
+    "segment_frames": 343980,
+    "sample_rate": 44100,
+    "overlap": 0.25
+  },
+  "method": {
+    "command": "bench <bundle-dir> 1",
+    "threads": 1,
+    "scope": "model forward",
+    "excluded": [
+      "weight loading",
+      "STFT",
+      "iSTFT",
+      "track overlap",
+      "network"
+    ],
+    "run_order": "original, optimized, optimized, original",
+    "notes": [
+      "Each process ran one initial and one steady forward pass.",
+      "Another reference process used multiple CPU cores during these runs.",
+      "These results do not measure Lambda."
+    ]
+  },
+  "changes": [
+    "Wider 4-by-16 GEMM on aarch64 and x86_64",
+    "Fixed linear weights transposed at model load",
+    "Attention evaluated in blocks of 64 queries",
+    "Convolution buffers limited to the available rows",
+    "FFT scratch reused between frames"
+  ],
+  "validation": {
+    "workspace_tests_passed": 26,
+    "includes_ignored_reference_tests": true,
+    "clippy_warnings": 0,
+    "full_output_comparison": {
+      "architecture": "aarch64-apple-darwin",
+      "cases": [
+        "deterministic noise",
+        "silence",
+        "stereo tones"
+      ],
+      "tensors": [
+        "spectral input",
+        "frequency output",
+        "waveform output",
+        "reconstructed stems"
+      ],
+      "method": "SHA-256 of every f32 bit pattern in little-endian order",
+      "all_identical": true
+    },
+    "kernel_comparison": {
+      "shapes_per_architecture": 1020,
+      "architectures": [
+        "native aarch64 NEON",
+        "x86_64 AVX2 through Rosetta"
+      ],
+      "method": "memcmp against the original kernel",
+      "all_identical": true
+    }
+  },
+  "runs": [
+    {
+      "label": "original-1",
+      "first_forward_seconds": 21.834,
+      "steady_forward_seconds": 20.196,
+      "max_rss_bytes": 1299169280,
+      "peak_footprint_bytes": 1302924800
+    },
+    {
+      "label": "current-1",
+      "first_forward_seconds": 15.926,
+      "steady_forward_seconds": 16.635,
+      "max_rss_bytes": 977715200,
+      "peak_footprint_bytes": 1081494592
+    },
+    {
+      "label": "current-2",
+      "first_forward_seconds": 17.453,
+      "steady_forward_seconds": 17.039,
+      "max_rss_bytes": 911065088,
+      "peak_footprint_bytes": 988286016
+    },
+    {
+      "label": "original-2",
+      "first_forward_seconds": 22.957,
+      "steady_forward_seconds": 20.973,
+      "max_rss_bytes": 1009205248,
+      "peak_footprint_bytes": 1252888128
+    }
+  ],
+  "baseline_mean_seconds": 20.5845,
+  "optimized_mean_seconds": 16.837,
+  "latency_reduction_percent": 18.21,
+  "source_sha256": {
+    "crates/stemsplits-htdemucs/kernels/gemm.c": "28c35768a414b50e047202c6b4e8b9958bb28cfbdf38034752137ed7fdbcfcb3",
+    "crates/stemsplits-htdemucs/src/ops.rs": "b4293ec8a0cb0915acd584b2a1827bc8ba79a446bf0a5d83bee91b0b5766e3e1",
+    "crates/stemsplits-htdemucs/src/transformer.rs": "b532e9f58b7c2392cb30d84c5c58650f4b8f0b6bd497018ea579e6a8bd9d7d8d",
+    "crates/stemsplits-stft/src/lib.rs": "f8d3461b349b13d868d2fdc2220aee2424fce3ae60a61b1a53de0c5294bc2575"
+  }
+}

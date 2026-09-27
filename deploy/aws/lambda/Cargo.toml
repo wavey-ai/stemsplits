@@ -1,0 +1,21 @@
+# Standalone: its own workspace so the root `cargo build` stays fast and the
+# Lambda's heavy deps do not leak into the library crates.
+[workspace]
+
+[package]
+name = "stems-lambda"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "bootstrap"
+path = "src/main.rs"
+
+[dependencies]
+stemsplits-htdemucs = { path = "../../../crates/stemsplits-htdemucs" }
+stemsplits-model = { path = "../../../crates/stemsplits-model" }
+stemsplits-stft = { path = "../../../crates/stemsplits-stft" }
+stemsplits-transport = { path = "../../../crates/stemsplits-transport" }
+lambda_http = "0.17"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -66,9 +66,67 @@ activations. The config is pinned in `tools/reference/demucs_config.json`.
   against dumped activations.
 - The single-threaded kernel pass reaches RTF 1.61.
 
-Next: the arm64/Graviton measurement that decides cloud versus phone, f16
-weights, a segment API and fan-out mirroring `bench/ecdc/aws`, and threading
-once a multi-vCPU function is chosen (a 1769 MB Lambda provides one vCPU).
+## Cloud service
+
+`stems-prod` runs on arm64 Lambda in `eu-north-1`. The deployment uses the default AWS credentials.
+Run `bash deploy/aws/deploy.sh` with Docker available and the exported weight bundle present.
+Run `bash deploy/aws/deploy-regions.sh` to copy that image to all five production regions.
+
+The API Gateway endpoint accepts one segment at `POST /prod/separate`.
+Requests require `X-Api-Key` and `Content-Type: application/octet-stream`.
+`X-Stems-Format: soundkit-v2-opus-192` is the only wire format. The request contains one SoundKit v2 stream of 192 kbps stereo Opus frames. The response contains four length-delimited SoundKit v2 streams in drums, bass, other, vocals order. Both directions remove the Opus codec delay and pad the tail so each decoded segment remains aligned before overlap-add.
+The decoded input has 343,980 frames at 44.1 kHz. API Gateway and Lambda use response streaming.
+
+`deploy/cloudflare` contains the `yl-vin-stems` Worker. It verifies a yl.vin session and forwards segment requests.
+The Worker stores the upstream key in its `STEMS_API_KEY` secret. The browser receives no upstream credential.
+Run `bash deploy/cloudflare/deploy.sh` after the AWS deployment.
+The Worker limits each user to 360 segment requests per minute. This permits a ten-minute track and bounded retries.
+API Gateway also applies the shared daily quota. Throttled proxy responses include `Retry-After`.
+Neither service stores submitted audio. Request handlers do not log audio or credentials.
+
+`stemsplits-web` prepares browser audio and reconstructs model responses with the shared chunk plan.
+It accepts mono or stereo tracks up to ten minutes long. FFT resampling converts other sample rates to 44.1 kHz.
+Reconstruction retains only the unfinished overlap. The browser dispatches all planned segments concurrently.
+The browser stores completed responses in temporary OPFS files and reads them in plan order.
+It removes these files after completion or cancellation. Web Locks protect active jobs during abandoned-file cleanup.
+The model segment remains 7.8 seconds with 25% overlap.
+
+`deploy/aws/wholetrack` runs as a separate ARM64 Lambda in the US East 1
+mastering stack. When a mastering job has no saved stems, it reads the
+uploaded lossless original, uses this repository's `SplitSession` for chunk
+planning and overlap-add, calls the deployed segment endpoint in batches of
+eight, and writes four aligned 192 kb/s SoundKit Opus estimates. It then
+invokes the mastering planner. The mastering deployment builds this worker
+with `deploy/aws/Wholetrack.Dockerfile`; its API key comes from the existing
+gitignored `deploy/aws/.api-key`. The worker stores estimates only in the
+private, short-lived mastering job bucket. The original mix remains the
+mastering render input.
+
+Each segment attempt has a 150-second deadline, including response-body reads.
+Transient network failures, timeouts, incomplete bodies, and HTTP 408, 425, 429, 500, 502, 503, and 504 can retry.
+Each segment has at most three attempts. Retries use exponential backoff, jitter, and `Retry-After`.
+Permanent errors cancel the remaining requests. Completed segments do not repeat.
+
+The app builds this package with `node scripts/build-wasm.mjs stemsplits` in `../bitneedle-app`.
+That command also installs `browser/client.mjs` and `browser/http.mjs`.
+The app then imports four WAV files through its normal library pipeline.
+
+## Cloud checks
+
+Deployment details and measured results are in [Cloud validation](docs/CLOUD_VALIDATION.md).
+
+```sh
+cargo test --workspace --lib
+cargo test --manifest-path deploy/aws/lambda/Cargo.toml
+cargo test --manifest-path deploy/aws/wholetrack/Cargo.toml
+node --test browser/client.test.mjs
+```
+
+In `../bitneedle-app`, run `node scripts/stems.browser.mjs` for isolated browser checks.
+Run `node --test scripts/stems-wasm.test.mjs` to check the compiled browser module.
+Run `node scripts/stems-edge.test.mjs` to check the compiled proxy with isolated service fixtures.
+Run `node scripts/stems.browser.mjs --live` for one 16-second track through yl.vin.
+This test creates and removes one temporary test identity.
 
 ## Separate a track
 

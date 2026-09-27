@@ -1,0 +1,12 @@
+[package]
+name = "stemsplits-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+frame-header = "0.2.2"
+rubato = "=0.14.1"
+soundkit = { git = "https://github.com/wavey-ai/soundkit.git", rev = "2fe6a85f56b9adc2da46cc7a419ce9b71c66d134" }
+soundkit-opus = { git = "https://github.com/wavey-ai/soundkit.git", rev = "2fe6a85f56b9adc2da46cc7a419ce9b71c66d134" }
+soundkit-stream = { git = "https://github.com/wavey-ai/soundkit.git", rev = "2fe6a85f56b9adc2da46cc7a419ce9b71c66d134" }

@@ -1,0 +1,31 @@
+[workspace]
+
+[package]
+name = "stems-wholetrack-lambda"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "bootstrap"
+path = "src/main.rs"
+
+[dependencies]
+aws-config = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-lambda = "1"
+aws-sdk-s3 = "1"
+frame-header = "0.2.2"
+futures = "0.3"
+lambda_runtime = "0.14"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+rubato = "=0.14.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+soundkit = { git = "https://github.com/wavey-ai/soundkit.git", rev = "15c2cc0ff08619e73b37c5290387c370cc4f9ea0", default-features = false }
+soundkit-library = { package = "soundkit-wasm", git = "https://github.com/wavey-ai/soundkit.git", rev = "15c2cc0ff08619e73b37c5290387c370cc4f9ea0", default-features = false, features = ["detect", "flac"] }
+soundkit-stream = { git = "https://github.com/wavey-ai/soundkit.git", rev = "15c2cc0ff08619e73b37c5290387c370cc4f9ea0" }
+stemsplits-web = { path = "../../../crates/stemsplits-web" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[profile.release]
+opt-level = 3

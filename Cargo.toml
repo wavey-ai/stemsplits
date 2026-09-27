@@ -5,6 +5,8 @@ members = [
     "crates/stemsplits-demucs",
     "crates/stemsplits-model",
     "crates/stemsplits-htdemucs",
+    "crates/stemsplits-transport",
+    "crates/stemsplits-web",
 ]
 
 [workspace.package]

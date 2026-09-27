@@ -6,34 +6,112 @@
 //! compiler will not do it — so the kernel is C with explicit AVX2/FMA or
 //! NEON, compiled by `build.rs`, as in `encodec-rs`.
 //!
-//! Single-threaded by design for now. A Lambda at 1769 MB gets one vCPU, so
-//! threading would only pay on a larger function; it is deferred until the
-//! scalar kernel is done. `STEMSPLITS_THREADS` is reserved for that.
+//! The GEMM splits its rows across threads, since a Lambda's vCPU count
+//! scales with its memory and the model is embarrassingly parallel over rows.
 
 extern "C" {
     fn stemsplits_gemm(a: *const f32, b: *const f32, out: *mut f32, m: usize, k: usize, n: usize);
 }
 
-/// How many threads the kernels would use. One for now.
+/// How many threads the kernels use: every vCPU by default, since a Lambda's
+/// vCPU count scales with its memory. `STEMSPLITS_THREADS` overrides.
 pub fn thread_count() -> usize {
     if let Ok(value) = std::env::var("STEMSPLITS_THREADS") {
         if let Ok(count) = value.parse::<usize>() {
             return count.max(1);
         }
     }
-    1
+    std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+}
+
+/// Below this much work, the threads cost more than they save.
+const PARALLEL_THRESHOLD: usize = 1 << 20;
+
+/// Runs `f` over disjoint chunks of `values`, across threads. For elementwise
+/// work (GELU, softmax) that would otherwise be serial beside the matmuls.
+pub fn parallel_chunks(values: &mut [f32], f: impl Fn(&mut [f32]) + Sync) {
+    let threads = thread_count();
+    if threads <= 1 || values.len() < 8192 {
+        f(values);
+        return;
+    }
+    let chunk = values.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        for part in values.chunks_mut(chunk) {
+            let body = &f;
+            scope.spawn(move || body(part));
+        }
+    });
+}
+
+/// Runs `f` over disjoint groups of `rows_per_call` rows of `values`.
+pub fn parallel_rows(values: &mut [f32], row_len: usize, f: impl Fn(&mut [f32]) + Sync) {
+    let rows = values.len() / row_len.max(1);
+    let threads = thread_count();
+    if threads <= 1 || rows < threads * 2 {
+        f(values);
+        return;
+    }
+    let group = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        for part in values.chunks_mut(group * row_len) {
+            let body = &f;
+            scope.spawn(move || body(part));
+        }
+    });
 }
 
 /// `out = a @ b`, with `a` `[m, k]`, `b` `[k, n]`, `out` `[m, n]`.
+///
+/// Rows are independent, so they split across threads without changing any
+/// per-row summation order — a threaded run is bit-identical to a serial one.
+/// Each thread calls the C kernel on its own row block.
 pub fn matmul(a: &[f32], b: &[f32], out: &mut [f32], m: usize, k: usize, n: usize) {
     debug_assert_eq!(a.len(), m * k);
     debug_assert_eq!(b.len(), k * n);
     debug_assert_eq!(out.len(), m * n);
-    // SAFETY: the lengths above are checked; the slices are disjoint by Rust's
-    // aliasing rules and the kernel writes only `out`.
-    unsafe {
-        stemsplits_gemm(a.as_ptr(), b.as_ptr(), out.as_mut_ptr(), m, k, n);
+
+    let threads = thread_count();
+    let work = m.saturating_mul(k).saturating_mul(n);
+    if threads <= 1 || m < threads * 2 || work < PARALLEL_THRESHOLD {
+        // SAFETY: the lengths above are checked; the slices are disjoint by
+        // Rust's aliasing rules and the kernel writes only `out`.
+        unsafe {
+            stemsplits_gemm(a.as_ptr(), b.as_ptr(), out.as_mut_ptr(), m, k, n);
+        }
+        return;
     }
+
+    // Raw addresses so the disjoint row blocks can move into the threads.
+    let a_address = a.as_ptr() as usize;
+    let b_address = b.as_ptr() as usize;
+    let out_address = out.as_mut_ptr() as usize;
+    let rows_per_thread = m.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut start = 0;
+        while start < m {
+            let rows = rows_per_thread.min(m - start);
+            let a_offset = start * k * std::mem::size_of::<f32>();
+            let out_offset = start * n * std::mem::size_of::<f32>();
+            scope.spawn(move || {
+                // SAFETY: each thread writes a disjoint row block of `out` and
+                // reads only `a` and `b`.
+                unsafe {
+                    stemsplits_gemm(
+                        (a_address + a_offset) as *const f32,
+                        b_address as *const f32,
+                        (out_address + out_offset) as *mut f32,
+                        rows,
+                        k,
+                        n,
+                    );
+                }
+            });
+            start += rows;
+        }
+    });
 }
 
 #[cfg(test)]

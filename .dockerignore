@@ -1,0 +1,11 @@
+**/target
+.git
+**/.api-key
+**/.dev.vars
+**/.secrets
+samples
+tools/reference/.venv
+tools/reference/.venv-ct
+tools/reference/out/reference
+tools/reference/out/htdemucs.onnx
+node_modules

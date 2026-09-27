@@ -45,6 +45,38 @@ void stemsplits_gemm(const float *a, const float *b, float *out,
         float *o3 = out + (i + 3) * n;
         size_t j = 0;
 #if defined(__AVX2__)
+#if defined(__x86_64__) || defined(_M_X64)
+        for (; j + 16 <= n; j += 16) {
+            __m256 c0l = _mm256_setzero_ps(), c0h = _mm256_setzero_ps();
+            __m256 c1l = _mm256_setzero_ps(), c1h = _mm256_setzero_ps();
+            __m256 c2l = _mm256_setzero_ps(), c2h = _mm256_setzero_ps();
+            __m256 c3l = _mm256_setzero_ps(), c3h = _mm256_setzero_ps();
+            for (size_t inner = 0; inner < k; inner++) {
+                const __m256 xl = _mm256_loadu_ps(b + inner * n + j);
+                const __m256 xh = _mm256_loadu_ps(b + inner * n + j + 8);
+                const __m256 v0 = _mm256_set1_ps(a0[inner]);
+                const __m256 v1 = _mm256_set1_ps(a1[inner]);
+                const __m256 v2 = _mm256_set1_ps(a2[inner]);
+                const __m256 v3 = _mm256_set1_ps(a3[inner]);
+                c0l = _mm256_fmadd_ps(v0, xl, c0l);
+                c0h = _mm256_fmadd_ps(v0, xh, c0h);
+                c1l = _mm256_fmadd_ps(v1, xl, c1l);
+                c1h = _mm256_fmadd_ps(v1, xh, c1h);
+                c2l = _mm256_fmadd_ps(v2, xl, c2l);
+                c2h = _mm256_fmadd_ps(v2, xh, c2h);
+                c3l = _mm256_fmadd_ps(v3, xl, c3l);
+                c3h = _mm256_fmadd_ps(v3, xh, c3h);
+            }
+            _mm256_storeu_ps(o0 + j, c0l);
+            _mm256_storeu_ps(o0 + j + 8, c0h);
+            _mm256_storeu_ps(o1 + j, c1l);
+            _mm256_storeu_ps(o1 + j + 8, c1h);
+            _mm256_storeu_ps(o2 + j, c2l);
+            _mm256_storeu_ps(o2 + j + 8, c2h);
+            _mm256_storeu_ps(o3 + j, c3l);
+            _mm256_storeu_ps(o3 + j + 8, c3h);
+        }
+#endif
         for (; j + 8 <= n; j += 8) {
             __m256 c0 = _mm256_setzero_ps(), c1 = _mm256_setzero_ps();
             __m256 c2 = _mm256_setzero_ps(), c3 = _mm256_setzero_ps();
@@ -61,6 +93,58 @@ void stemsplits_gemm(const float *a, const float *b, float *out,
             _mm256_storeu_ps(o3 + j, c3);
         }
 #elif defined(__aarch64__) || defined(__ARM_NEON)
+#if defined(__aarch64__)
+        for (; j + 16 <= n; j += 16) {
+            float32x4_t c00 = vdupq_n_f32(0.0f), c01 = vdupq_n_f32(0.0f);
+            float32x4_t c02 = vdupq_n_f32(0.0f), c03 = vdupq_n_f32(0.0f);
+            float32x4_t c10 = vdupq_n_f32(0.0f), c11 = vdupq_n_f32(0.0f);
+            float32x4_t c12 = vdupq_n_f32(0.0f), c13 = vdupq_n_f32(0.0f);
+            float32x4_t c20 = vdupq_n_f32(0.0f), c21 = vdupq_n_f32(0.0f);
+            float32x4_t c22 = vdupq_n_f32(0.0f), c23 = vdupq_n_f32(0.0f);
+            float32x4_t c30 = vdupq_n_f32(0.0f), c31 = vdupq_n_f32(0.0f);
+            float32x4_t c32 = vdupq_n_f32(0.0f), c33 = vdupq_n_f32(0.0f);
+            for (size_t inner = 0; inner < k; inner++) {
+                const float32x4_t x0 = vld1q_f32(b + inner * n + j);
+                const float32x4_t x1 = vld1q_f32(b + inner * n + j + 4);
+                const float32x4_t x2 = vld1q_f32(b + inner * n + j + 8);
+                const float32x4_t x3 = vld1q_f32(b + inner * n + j + 12);
+                const float v0 = a0[inner], v1 = a1[inner];
+                const float v2 = a2[inner], v3 = a3[inner];
+                c00 = vmlaq_n_f32(c00, x0, v0);
+                c01 = vmlaq_n_f32(c01, x1, v0);
+                c02 = vmlaq_n_f32(c02, x2, v0);
+                c03 = vmlaq_n_f32(c03, x3, v0);
+                c10 = vmlaq_n_f32(c10, x0, v1);
+                c11 = vmlaq_n_f32(c11, x1, v1);
+                c12 = vmlaq_n_f32(c12, x2, v1);
+                c13 = vmlaq_n_f32(c13, x3, v1);
+                c20 = vmlaq_n_f32(c20, x0, v2);
+                c21 = vmlaq_n_f32(c21, x1, v2);
+                c22 = vmlaq_n_f32(c22, x2, v2);
+                c23 = vmlaq_n_f32(c23, x3, v2);
+                c30 = vmlaq_n_f32(c30, x0, v3);
+                c31 = vmlaq_n_f32(c31, x1, v3);
+                c32 = vmlaq_n_f32(c32, x2, v3);
+                c33 = vmlaq_n_f32(c33, x3, v3);
+            }
+            vst1q_f32(o0 + j, c00);
+            vst1q_f32(o0 + j + 4, c01);
+            vst1q_f32(o0 + j + 8, c02);
+            vst1q_f32(o0 + j + 12, c03);
+            vst1q_f32(o1 + j, c10);
+            vst1q_f32(o1 + j + 4, c11);
+            vst1q_f32(o1 + j + 8, c12);
+            vst1q_f32(o1 + j + 12, c13);
+            vst1q_f32(o2 + j, c20);
+            vst1q_f32(o2 + j + 4, c21);
+            vst1q_f32(o2 + j + 8, c22);
+            vst1q_f32(o2 + j + 12, c23);
+            vst1q_f32(o3 + j, c30);
+            vst1q_f32(o3 + j + 4, c31);
+            vst1q_f32(o3 + j + 8, c32);
+            vst1q_f32(o3 + j + 12, c33);
+        }
+#endif
         for (; j + 8 <= n; j += 8) {
             float32x4_t c0l = vdupq_n_f32(0.0f), c0h = vdupq_n_f32(0.0f);
             float32x4_t c1l = vdupq_n_f32(0.0f), c1h = vdupq_n_f32(0.0f);

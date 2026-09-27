@@ -13,13 +13,15 @@ const FRAC_1_SQRT_2: f32 = std::f32::consts::FRAC_1_SQRT_2;
 
 /// `F.gelu`, the exact (`approximate = "none"`) form.
 pub fn gelu(x: &Tensor) -> Tensor {
+    let mut data = x.data.clone();
+    crate::matmul::parallel_chunks(&mut data, |chunk| {
+        for value in chunk.iter_mut() {
+            *value = 0.5 * *value * (1.0 + libm::erff(*value * FRAC_1_SQRT_2));
+        }
+    });
     Tensor {
         shape: x.shape.clone(),
-        data: x
-            .data
-            .iter()
-            .map(|&value| 0.5 * value * (1.0 + libm::erff(value * FRAC_1_SQRT_2)))
-            .collect(),
+        data,
     }
 }
 
@@ -142,44 +144,42 @@ pub fn layer_norm(x: &Tensor, weight: &[f32], bias: &[f32], eps: f32) -> Tensor 
     assert_eq!(weight.len(), features);
     let rows = x.numel() / features;
     let mut output = x.clone();
-    for row in 0..rows {
-        let base = row * features;
-        let mut mean = 0.0f64;
-        for feature in 0..features {
-            mean += x.data[base + feature] as f64;
+    crate::matmul::parallel_rows(&mut output.data, features, |chunk| {
+        for row in chunk.chunks_mut(features) {
+            let mut mean = 0.0f64;
+            for value in row.iter() {
+                mean += *value as f64;
+            }
+            mean /= features as f64;
+            let mut variance = 0.0f64;
+            for value in row.iter() {
+                let delta = *value as f64 - mean;
+                variance += delta * delta;
+            }
+            variance /= features as f64;
+            let inverse = 1.0 / ((variance as f32) + eps).sqrt();
+            for (feature, value) in row.iter_mut().enumerate() {
+                *value = (*value - mean as f32) * inverse * weight[feature] + bias[feature];
+            }
         }
-        mean /= features as f64;
-        let mut variance = 0.0f64;
-        for feature in 0..features {
-            let delta = x.data[base + feature] as f64 - mean;
-            variance += delta * delta;
-        }
-        variance /= features as f64;
-        let inverse = 1.0 / ((variance as f32) + eps).sqrt();
-        for feature in 0..features {
-            let normalised = (x.data[base + feature] - mean as f32) * inverse;
-            output.data[base + feature] = normalised * weight[feature] + bias[feature];
-        }
-    }
+    });
+    let _ = rows;
     output
 }
 
 /// `nn.Linear` over the last axis: `x @ weight^T + bias`.
 ///
-/// The weight is transposed to `[features, out]` first, so the matmul's inner
-/// loop walks contiguous memory and vectorises — a dot-product form does not,
-/// because a reduction is a single serial chain. The transpose is `out *
-/// features` against `rows * out * features` of work, so it is free in
-/// practice.
+/// Transposes the weight to `[features, out]` before multiplication.
 pub fn linear(x: &Tensor, weight: &[f32], bias: &[f32]) -> Tensor {
     let features = *x.shape.last().unwrap();
     let out_features = weight.len() / features;
     assert_eq!(weight.len() % features, 0, "linear weight shape");
     assert_eq!(bias.len(), out_features);
-    let rows = x.numel() / features;
-    let mut shape = x.shape.clone();
-    *shape.last_mut().unwrap() = out_features;
+    let transposed = transpose_weight(weight, features, out_features);
+    linear_transposed(x, &transposed, bias)
+}
 
+fn transpose_weight(weight: &[f32], features: usize, out_features: usize) -> Vec<f32> {
     let mut transposed = vec![0.0f32; features * out_features];
     for out in 0..out_features {
         let row = &weight[out * features..(out + 1) * features];
@@ -187,15 +187,42 @@ pub fn linear(x: &Tensor, weight: &[f32], bias: &[f32]) -> Tensor {
             transposed[feature * out_features + out] = value;
         }
     }
+    transposed
+}
+
+/// Stores fixed weights in the matrix kernel's input layout.
+pub(crate) struct Linear {
+    transposed: Vec<f32>,
+    bias: Vec<f32>,
+    features: usize,
+}
+
+impl Linear {
+    pub(crate) fn new(weight: &[f32], bias: Vec<f32>) -> Self {
+        assert!(!bias.is_empty(), "linear output features");
+        assert_eq!(weight.len() % bias.len(), 0, "linear weight shape");
+        let features = weight.len() / bias.len();
+        Self {
+            transposed: transpose_weight(weight, features, bias.len()),
+            bias,
+            features,
+        }
+    }
+
+    pub(crate) fn forward(&self, x: &Tensor) -> Tensor {
+        assert_eq!(*x.shape.last().unwrap(), self.features);
+        linear_transposed(x, &self.transposed, &self.bias)
+    }
+}
+
+fn linear_transposed(x: &Tensor, transposed: &[f32], bias: &[f32]) -> Tensor {
+    let features = *x.shape.last().unwrap();
+    let out_features = bias.len();
+    let rows = x.numel() / features;
+    let mut shape = x.shape.clone();
+    *shape.last_mut().unwrap() = out_features;
     let mut data = vec![0.0f32; rows * out_features];
-    crate::matmul::matmul(
-        &x.data,
-        &transposed,
-        &mut data,
-        rows,
-        features,
-        out_features,
-    );
+    crate::matmul::matmul(&x.data, transposed, &mut data, rows, features, out_features);
     for row in 0..rows {
         let base = row * out_features;
         for out in 0..out_features {
@@ -266,7 +293,7 @@ pub fn conv1d(
         }
     }
 
-    let rows_per_tile = (2_000_000 / columns.max(1)).max(1);
+    let rows_per_tile = (2_000_000 / columns.max(1)).max(1).min(out_time);
     let mut patches = vec![0.0f32; rows_per_tile * columns];
     let mut tile_output = vec![0.0f32; rows_per_tile * out_channels];
 
@@ -353,7 +380,9 @@ pub fn conv2d(
     }
 
     // Keep the patch tile near 8 MB of f32.
-    let rows_per_tile = (2_000_000 / (out_width * columns).max(1)).max(1);
+    let rows_per_tile = (2_000_000 / (out_width * columns).max(1))
+        .max(1)
+        .min(out_height);
     let mut patches = vec![0.0f32; rows_per_tile * out_width * columns];
     let mut tile_output = vec![0.0f32; rows_per_tile * out_width * out_channels];
 
@@ -442,7 +471,7 @@ pub fn conv_transpose1d(
     let contributions = out_channels * kernel;
     let mut output = Tensor::zeros(vec![batch, out_channels, out_time]);
 
-    let positions_per_tile = (2_000_000 / contributions.max(1)).max(1);
+    let positions_per_tile = (2_000_000 / contributions.max(1)).max(1).min(time);
     let mut block = vec![0.0f32; positions_per_tile * contributions];
     let mut input_block = vec![0.0f32; positions_per_tile * in_channels];
     for index in 0..batch {
@@ -505,7 +534,7 @@ pub fn conv_transpose2d(
     let mut output = Tensor::zeros(vec![batch, out_channels, out_height, out_width]);
 
     let positions = height * width;
-    let positions_per_tile = (2_000_000 / contributions.max(1)).max(1);
+    let positions_per_tile = (2_000_000 / contributions.max(1)).max(1).min(positions);
     let mut block = vec![0.0f32; positions_per_tile * contributions];
     let mut input_block = vec![0.0f32; positions_per_tile * in_channels];
     for index in 0..batch {

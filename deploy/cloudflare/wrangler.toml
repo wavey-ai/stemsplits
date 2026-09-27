@@ -1,0 +1,33 @@
+name = "yl-vin-stems"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-09-17"
+account_id = "c57bb20727aa3564966d2bb693abddce"
+workers_dev = false
+preview_urls = false
+
+[build]
+command = "worker-build --release --no-panic-recovery"
+
+[limits]
+cpu_ms = 200
+
+[observability]
+enabled = false
+
+[vars]
+PUBLIC_ORIGIN = "https://yl.vin"
+STEMS_ENDPOINT_EU_NORTH_1 = "https://d23dlwkayd.execute-api.eu-north-1.amazonaws.com/prod/separate"
+STEMS_ENDPOINT_EU_WEST_1 = "https://90fxuid4p7.execute-api.eu-west-1.amazonaws.com/prod/separate"
+STEMS_ENDPOINT_US_EAST_1 = "https://4hl3b12xjc.execute-api.us-east-1.amazonaws.com/prod/separate"
+STEMS_ENDPOINT_US_WEST_2 = "https://kly04v0nhe.execute-api.us-west-2.amazonaws.com/prod/separate"
+STEMS_ENDPOINT_AP_SOUTHEAST_1 = "https://hiseyuysng.execute-api.ap-southeast-1.amazonaws.com/prod/separate"
+
+[[services]]
+binding = "IDENTITY"
+service = "yl-vin-id"
+
+[[unsafe.bindings]]
+name = "STEMS_LIMITER"
+type = "ratelimit"
+namespace_id = "2026092401"
+simple = { limit = 360, period = 60 }

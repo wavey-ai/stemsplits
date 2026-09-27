@@ -1,4 +1,10 @@
 /target
+**/target/
+deploy/aws/.api-key
+deploy/cloudflare/.dev.vars
+.wrangler/
+deploy/cloudflare/build/
+crates/stemsplits-web/pkg/
 **/*.rs.bk
 *.mlpackage
 *.mlmodelc

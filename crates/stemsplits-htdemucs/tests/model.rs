@@ -54,6 +54,31 @@ fn full_model_matches_the_reference_stems() {
     compare(&stems, &load_reference("stems"), "stems");
 }
 
+#[test]
+#[ignore = "needs tools/reference export and dump"]
+fn segment_service_matches_the_reference_stems() {
+    let weights = load_bundle();
+    let model = HtDemucs::load(&weights).unwrap();
+    let waveform = load_reference("input");
+    let segment = Geometry::CONTRACT.segment;
+    let mut stft = Stft::new(Geometry::CONTRACT);
+    let output = stemsplits_htdemucs::separate::separate_segment(
+        &model,
+        &waveform.data[..segment],
+        &waveform.data[segment..],
+        &mut stft,
+    );
+    let data = output
+        .into_iter()
+        .flat_map(|channels| channels.into_iter().flatten())
+        .collect();
+    compare(
+        &Tensor::new(vec![1, 4, 2, segment], data),
+        &load_reference("stems"),
+        "segment service",
+    );
+}
+
 /// `time + iSTFT(freq) * sqrt(fft_size)`, per stem and channel. The frequency
 /// branch is `[16, Fr, T]` with channel `stem * 4 + channel * 2 + component`.
 fn reconstruct_stems(frequency: &Tensor, time: &Tensor) -> Tensor {

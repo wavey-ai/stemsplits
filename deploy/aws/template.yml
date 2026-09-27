@@ -1,0 +1,245 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "stemsplits segment service, one HTDemucs segment per Lambda invocation"
+
+Parameters:
+  DeployCompute:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  ImageUri:
+    Type: String
+    Default: public.ecr.aws/lambda/provided:al2023
+  ApiKeyValue:
+    Type: String
+    NoEcho: true
+    MinLength: 20
+  MemorySize:
+    Type: Number
+    Default: 1769
+    MinValue: 512
+    MaxValue: 10240
+  ReservedConcurrency:
+    Type: Number
+    Default: 0
+    MinValue: 0
+  DeploymentToken:
+    Type: String
+    Default: bootstrap
+
+Conditions:
+  ComputeEnabled: !Equals [!Ref DeployCompute, 'true']
+  HasReservedConcurrency: !Not [!Equals [!Ref ReservedConcurrency, 0]]
+
+Resources:
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: stems-lambda-prod
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: >-
+          {"rules":[{"rulePriority":1,"description":"Keep five images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},"action":{"type":"expire"}}]}
+
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Condition: ComputeEnabled
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  SeparateFunction:
+    Type: AWS::Lambda::Function
+    Condition: ComputeEnabled
+    Properties:
+      FunctionName: stems-prod
+      PackageType: Image
+      Code: { ImageUri: !Ref ImageUri }
+      Role: !GetAtt FunctionRole.Arn
+      Architectures: [arm64]
+      MemorySize: !Ref MemorySize
+      Timeout: 120
+      ReservedConcurrentExecutions: !If
+        - HasReservedConcurrency
+        - !Ref ReservedConcurrency
+        - !Ref AWS::NoValue
+      Environment:
+        Variables:
+          BUNDLE_DIR: /opt/bundle
+          API_KEY: !Ref ApiKeyValue
+          DEPLOYMENT_ID: !Ref DeploymentToken
+
+  FunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: ComputeEnabled
+    Properties:
+      LogGroupName: /aws/lambda/stems-prod
+      RetentionInDays: 7
+
+  Api:
+    Type: AWS::ApiGateway::RestApi
+    Condition: ComputeEnabled
+    Properties:
+      Name: stems-prod
+      Description: One independent HTDemucs segment per request
+      BinaryMediaTypes: [application/octet-stream]
+      EndpointConfiguration: { Types: [REGIONAL] }
+
+  SeparateResource:
+    Type: AWS::ApiGateway::Resource
+    Condition: ComputeEnabled
+    Properties:
+      RestApiId: !Ref Api
+      ParentId: !GetAtt Api.RootResourceId
+      PathPart: separate
+
+  HealthResource:
+    Type: AWS::ApiGateway::Resource
+    Condition: ComputeEnabled
+    Properties:
+      RestApiId: !Ref Api
+      ParentId: !GetAtt Api.RootResourceId
+      PathPart: health
+
+  SeparateMethod:
+    Type: AWS::ApiGateway::Method
+    Condition: ComputeEnabled
+    Properties:
+      RestApiId: !Ref Api
+      ResourceId: !Ref SeparateResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        TimeoutInMillis: 120000
+        ResponseTransferMode: STREAM
+        Uri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2021-11-15/functions/${SeparateFunction.Arn}/response-streaming-invocations
+
+  SeparateOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Condition: ComputeEnabled
+    Properties:
+      RestApiId: !Ref Api
+      ResourceId: !Ref SeparateResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'https://yl.vin'"
+            ResponseTemplates:
+              application/json: ''
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  HealthMethod:
+    Type: AWS::ApiGateway::Method
+    Condition: ComputeEnabled
+    Properties:
+      RestApiId: !Ref Api
+      ResourceId: !Ref HealthResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'https://yl.vin'"
+            ResponseTemplates:
+              application/json: 'ok'
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+
+  ApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: ComputeEnabled
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref SeparateFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    Condition: ComputeEnabled
+    DependsOn: [SeparateMethod, SeparateOptionsMethod, HealthMethod]
+    Properties:
+      RestApiId: !Ref Api
+      Description: !Sub production-${DeploymentToken}
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Condition: ComputeEnabled
+    Properties:
+      RestApiId: !Ref Api
+      DeploymentId: !Ref ApiDeployment
+      StageName: prod
+      MethodSettings:
+        - ResourcePath: /separate
+          HttpMethod: POST
+          MetricsEnabled: true
+          ThrottlingBurstLimit: 200
+          ThrottlingRateLimit: 100
+
+  ApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    Condition: ComputeEnabled
+    Properties:
+      Name: stems-prod
+      Enabled: true
+      Value: !Ref ApiKeyValue
+
+  UsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    Condition: ComputeEnabled
+    Properties:
+      UsagePlanName: stems-prod
+      ApiStages:
+        - ApiId: !Ref Api
+          Stage: !Ref ApiStage
+      Throttle: { BurstLimit: 200, RateLimit: 100 }
+      Quota: { Limit: 10000, Period: DAY }
+
+  UsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Condition: ComputeEnabled
+    Properties:
+      KeyId: !Ref ApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref UsagePlan
+
+Outputs:
+  RepositoryUri:
+    Value: !GetAtt Repository.RepositoryUri
+  ApiId:
+    Condition: ComputeEnabled
+    Value: !Ref Api
+  Endpoint:
+    Condition: ComputeEnabled
+    Value: !Sub https://${Api}.execute-api.${AWS::Region}.${AWS::URLSuffix}/prod
+  FunctionName:
+    Condition: ComputeEnabled
+    Value: !Ref SeparateFunction

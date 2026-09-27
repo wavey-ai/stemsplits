@@ -11,6 +11,49 @@ use stemsplits_stft::{Geometry, Spectrum, Stft};
 use crate::model::HtDemucs;
 use crate::tensor::Tensor;
 
+/// One model segment. Output order is drums, bass, other, vocals, with planar channels.
+pub fn separate_segment(
+    model: &HtDemucs,
+    left: &[f32],
+    right: &[f32],
+    stft: &mut Stft,
+) -> Vec<[Vec<f32>; 2]> {
+    let geometry = Geometry::CONTRACT;
+    let segment = geometry.segment;
+    assert_eq!(left.len(), segment);
+    assert_eq!(right.len(), segment);
+    let magnitude = Tensor::new(
+        vec![1, 4, geometry.bins, geometry.frames],
+        stft.spectral_input(left, right),
+    );
+    let mut planar = Vec::with_capacity(2 * segment);
+    planar.extend_from_slice(left);
+    planar.extend_from_slice(right);
+    let waveform = Tensor::new(vec![1, 2, segment], planar);
+    let (frequency, time) = model.forward(&magnitude, &waveform);
+    let planes = geometry.bins * geometry.frames;
+    let scale = (geometry.fft_size as f32).sqrt();
+    (0..4)
+        .map(|stem| {
+            std::array::from_fn(|channel| {
+                let real_channel = stem * 4 + channel * 2;
+                let real =
+                    frequency.data[real_channel * planes..(real_channel + 1) * planes].to_vec();
+                let imaginary = frequency.data
+                    [(real_channel + 1) * planes..(real_channel + 2) * planes]
+                    .to_vec();
+                let inverse = stft.inverse(&Spectrum { real, imaginary });
+                let time_base = (stem * 2 + channel) * segment;
+                inverse
+                    .iter()
+                    .enumerate()
+                    .map(|(position, value)| time.data[time_base + position] + value * scale)
+                    .collect()
+            })
+        })
+        .collect()
+}
+
 /// Four stems, each with a left and a right channel, each as long as the
 /// input. Order is drums, bass, other, vocals.
 pub fn separate(
@@ -25,8 +68,6 @@ pub fn separate(
     let segment = geometry.segment;
     let offsets = plan.offsets(total);
     let window = triangular_weight(segment);
-    let scale = (geometry.fft_size as f32).sqrt();
-    let planes = geometry.bins * geometry.frames;
     let mut stft = Stft::new(geometry);
 
     let mut accumulators: Vec<[OverlapAdd; 2]> = (0..4)
@@ -46,31 +87,10 @@ pub fn separate(
             *value = 0.0;
         }
 
-        let magnitude = Tensor::new(
-            vec![1, 4, geometry.bins, geometry.frames],
-            stft.spectral_input(&left_segment, &right_segment),
-        );
-        let mut interleaved = Vec::with_capacity(2 * segment);
-        interleaved.extend_from_slice(&left_segment);
-        interleaved.extend_from_slice(&right_segment);
-        let waveform = Tensor::new(vec![1, 2, segment], interleaved);
-
-        let (frequency, time) = model.forward(&magnitude, &waveform);
+        let rendered = separate_segment(model, &left_segment, &right_segment, &mut stft);
         for (stem, channels) in accumulators.iter_mut().enumerate() {
             for (channel, accumulator) in channels.iter_mut().enumerate() {
-                let real_channel = stem * 4 + channel * 2;
-                let real =
-                    frequency.data[real_channel * planes..(real_channel + 1) * planes].to_vec();
-                let imaginary = frequency.data
-                    [(real_channel + 1) * planes..(real_channel + 2) * planes]
-                    .to_vec();
-                let inverse = stft.inverse(&Spectrum { real, imaginary });
-                let time_base = (stem * 2 + channel) * segment;
-                let mut rendered = vec![0.0f32; segment];
-                for (position, value) in rendered.iter_mut().enumerate() {
-                    *value = time.data[time_base + position] + inverse[position] * scale;
-                }
-                accumulator.add(offset, &rendered, &window);
+                accumulator.add(offset, &rendered[stem][channel], &window);
             }
         }
         progress(index + 1, offsets.len());
