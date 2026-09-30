@@ -3,8 +3,9 @@
 #
 #   deploy/aws/deploy.sh
 #
-# Region defaults to eu-north-1. Needs the weight bundle, built by
-# tools/reference/export.py, and Docker with buildx for linux/arm64.
+# Region defaults to eu-north-1. Needs the f16 weight bundle and Docker with
+# buildx for linux/arm64. tools/reference/export.py writes the f32 bundle, and
+# the f16_bundle example of stemsplits-model writes the f16 bundle from it.
 set -euo pipefail
 
 # This deployment uses the default AWS credentials.
@@ -20,8 +21,8 @@ key_file="deploy/aws/.api-key"
 template="deploy/aws/template.yml"
 skip_image_build="${STEMS_SKIP_IMAGE_BUILD:-false}"
 
-if [[ ! -f tools/reference/out/bundle/bundle.json ]]; then
-  echo "weight bundle missing; run tools/reference/.venv/bin/python tools/reference/export.py" >&2
+if [[ ! -f tools/reference/out/bundle-f16/bundle.json ]]; then
+  echo "f16 weight bundle missing; run cargo run --release -p stemsplits-model --example f16_bundle -- tools/reference/out/bundle tools/reference/out/bundle-f16" >&2
   exit 1
 fi
 

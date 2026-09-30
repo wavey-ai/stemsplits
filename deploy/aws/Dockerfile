@@ -16,6 +16,7 @@ RUN cargo build --release
 FROM public.ecr.aws/lambda/provided:al2023
 COPY --from=build /src/deploy/aws/lambda/target/release/bootstrap ${LAMBDA_RUNTIME_DIR}/bootstrap
 # The weight bundle travels in the image so a cold start is one file read.
-COPY tools/reference/out/bundle /opt/bundle
+# The f16 bundle holds the same weights as the f32 bundle in half the bytes.
+COPY tools/reference/out/bundle-f16 /opt/bundle
 ENV BUNDLE_DIR=/opt/bundle
 CMD ["bootstrap"]

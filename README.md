@@ -75,7 +75,7 @@ activations. The config is pinned in `tools/reference/demucs_config.json`.
 ## Cloud service
 
 `stems-prod` runs on arm64 Lambda in `eu-north-1`. The deployment uses the default AWS credentials.
-Run `bash deploy/aws/deploy.sh` with Docker available and the exported weight bundle present.
+Run `bash deploy/aws/deploy.sh` with Docker available and the f16 weight bundle present. The image carries the f16 bundle.
 Run `bash deploy/aws/deploy-regions.sh` to copy that image to all five production regions.
 
 The API Gateway endpoint accepts one segment at `POST /prod/separate`.
