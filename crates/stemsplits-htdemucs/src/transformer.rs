@@ -354,7 +354,7 @@ fn attention_head(
             let maximum = row.iter().copied().fold(f32::MIN, f32::max);
             let mut sum = 0.0f32;
             for value in row.iter_mut() {
-                *value = (*value - maximum).exp();
+                *value = crate::ops::exp(*value - maximum);
                 sum += *value;
             }
             for value in row.iter_mut() {

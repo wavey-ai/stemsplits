@@ -26,7 +26,44 @@ pub fn gelu(x: &Tensor) -> Tensor {
 }
 
 pub fn sigmoid(value: f32) -> f32 {
-    1.0 / (1.0 + (-value).exp())
+    1.0 / (1.0 + exp(-value))
+}
+
+/// `e^x`. On wasm32, `f32::exp` is a slow software routine, so this is a
+/// range reduction to `[-ln 2 / 2, ln 2 / 2]` and a degree-6 polynomial,
+/// within about 1 ulp of it.
+#[cfg(target_arch = "wasm32")]
+#[inline]
+pub fn exp(x: f32) -> f32 {
+    if x < -87.33 {
+        return 0.0;
+    }
+    if x > 88.72 {
+        return f32::INFINITY;
+    }
+    if x.is_nan() {
+        return x;
+    }
+    let n = (x * std::f32::consts::LOG2_E).round_ties_even();
+    let r = (x - n * 0.693_145_75) - n * 1.428_606_8e-6;
+    let p = 1.0
+        + r * (1.0
+            + r * (0.5
+                + r * (1.0 / 6.0 + r * (1.0 / 24.0 + r * (1.0 / 120.0 + r * (1.0 / 720.0))))));
+    // 2^n for n in [-126, 127]; below that, scale in two steps.
+    let n = n as i32;
+    if n < -126 {
+        return p
+            * f32::from_bits(((n + 127 + 64) as u32) << 23)
+            * f32::from_bits(((127 - 64) as u32) << 23);
+    }
+    p * f32::from_bits(((n + 127) as u32) << 23)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+pub fn exp(x: f32) -> f32 {
+    x.exp()
 }
 
 /// `F.glu(x, dim = 1)`: `a * sigmoid(b)` where the channel axis is split in

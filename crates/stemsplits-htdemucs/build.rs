@@ -1,6 +1,10 @@
 fn main() {
     println!("cargo:rerun-if-changed=kernels/gemm.c");
     let target = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    // wasm32 uses the SIMD128 kernel in `matmul.rs`.
+    if target == "wasm32" {
+        return;
+    }
     let mut build = cc::Build::new();
     build.file("kernels/gemm.c").opt_level(3).warnings(false);
     match target.as_str() {

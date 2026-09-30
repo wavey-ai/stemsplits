@@ -37,6 +37,12 @@ crates/
   stemsplits-demucs/   StemKind, the chunk plan, and the overlap-add seam
   stemsplits-model/    the weight bundle format and loader
   stemsplits-htdemucs/ the forward pass and its C GEMM kernel
+  stemsplits-web/      browser preparation, the chunk plan, and the seam
+  stemsplits-wasm/     the forward pass for a browser, behind wasm-bindgen
+browser/
+  client.mjs           segments through the cloud service
+  local.mjs            segments through HTDemucs in a pool of browser workers
+  model.worker.mjs     one HTDemucs model in one worker
 tools/
   oracle-stft/         the Swift/vDSP oracle and its golden vectors
   reference/           the PyTorch reference, pinned config, export, ONNX baseline
@@ -137,6 +143,51 @@ cargo run --release -p stemsplits-htdemucs --bin separate -- <in.wav> <out-dir>
 Input is 44.1 kHz stereo (prepare with `ffmpeg -ar 44100 -ac 2 -c:a pcm_s16le`);
 output is four stem WAVs. It runs the whole track through the pinned chunk
 plan and overlap-add seam. Sample output is described in `samples/README.md`.
+
+## Separate a track in a browser
+
+`stemsplits-wasm` compiles the forward pass to WASM with SIMD128. On wasm32,
+the GEMM is a Rust kernel. It uses the same blocks and the same accumulation
+order as the C kernel. The browser loads the f16 weight bundle and widens
+the weights to f32. The compute is f32.
+
+`browser/local.mjs` gives three functions:
+
+- `loadModel(base)` reads `bundle.json` and the weight blob under `base`. It
+  checks the blob against the manifest digest with WebCrypto.
+- `poolSize()` gives the number of workers for the device: one on a phone
+  or tablet, and a maximum of four on a desktop.
+- `splitSegmentsLocal(session, options)` sends the segments of a
+  `SplitSession` to the workers in plan order. It gives the stems to
+  `session.accept_samples` in plan order. The plan and the seam are the same
+  as for the cloud service. The segments are f32 samples, not Opus.
+
+Each worker uses approximately 680 MB of WASM memory.
+
+Make the f16 bundle from the f32 bundle:
+
+```sh
+cargo run --release -p stemsplits-model --example f16_bundle -- \
+  tools/reference/out/bundle tools/reference/out/bundle-f16
+```
+
+The f16 bundle is 84 MB. The f32 weights of this checkpoint are f16 values,
+so the f16 bundle gives the same model.
+
+Build the package for Node and compare one segment with the native build:
+
+```sh
+RUSTFLAGS="-C target-feature=+simd128" \
+  cargo build --release --target wasm32-unknown-unknown -p stemsplits-wasm
+wasm-bindgen --target nodejs --out-dir target/wasm-node \
+  target/wasm32-unknown-unknown/release/stemsplits_wasm.wasm
+cargo run --release -p stemsplits-wasm --example segment -- \
+  tools/reference/out/bundle native.f32
+```
+
+In `../bitneedle-app`, `node scripts/build-wasm.mjs stemsplits stemmodel`
+builds both packages and copies `browser/local.mjs`,
+`browser/model.worker.mjs`, and the f16 bundle.
 
 ## Build and test
 

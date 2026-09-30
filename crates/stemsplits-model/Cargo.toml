@@ -12,6 +12,7 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+half = "2"
 
 [dev-dependencies]
 tempfile = "3"

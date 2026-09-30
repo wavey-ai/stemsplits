@@ -9,8 +9,94 @@
 //! The GEMM splits its rows across threads, since a Lambda's vCPU count
 //! scales with its memory and the model is embarrassingly parallel over rows.
 
+#[cfg(not(target_arch = "wasm32"))]
 extern "C" {
     fn stemsplits_gemm(a: *const f32, b: *const f32, out: *mut f32, m: usize, k: usize, n: usize);
+}
+
+/// The kernel for wasm32. Like the C kernel, it works on blocks of four rows
+/// by 16 columns, so each load of `b` serves four rows, and it sums each
+/// output in `inner` order.
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::needless_range_loop)]
+unsafe fn stemsplits_gemm(
+    a: *const f32,
+    b: *const f32,
+    out: *mut f32,
+    m: usize,
+    k: usize,
+    n: usize,
+) {
+    #[cfg(target_feature = "simd128")]
+    use core::arch::wasm32::{f32x4_add, f32x4_mul, f32x4_splat, v128, v128_load, v128_store};
+    let scalar = |i: usize, column: usize| {
+        let mut sum = 0.0f32;
+        for inner in 0..k {
+            sum += *a.add(i * k + inner) * *b.add(inner * n + column);
+        }
+        *out.add(i * n + column) = sum;
+    };
+    let mut i = 0;
+    while i + 4 <= m {
+        let mut j = 0;
+        #[cfg(target_feature = "simd128")]
+        {
+            let rows = [
+                a.add(i * k),
+                a.add((i + 1) * k),
+                a.add((i + 2) * k),
+                a.add((i + 3) * k),
+            ];
+            while j + 16 <= n {
+                let mut c = [[f32x4_splat(0.0); 4]; 4];
+                for inner in 0..k {
+                    let row = b.add(inner * n + j);
+                    let x = [
+                        v128_load(row as *const v128),
+                        v128_load(row.add(4) as *const v128),
+                        v128_load(row.add(8) as *const v128),
+                        v128_load(row.add(12) as *const v128),
+                    ];
+                    for r in 0..4 {
+                        let v = f32x4_splat(*rows[r].add(inner));
+                        for lane in 0..4 {
+                            c[r][lane] = f32x4_add(c[r][lane], f32x4_mul(v, x[lane]));
+                        }
+                    }
+                }
+                for r in 0..4 {
+                    for lane in 0..4 {
+                        v128_store(out.add((i + r) * n + j + lane * 4) as *mut v128, c[r][lane]);
+                    }
+                }
+                j += 16;
+            }
+            while j + 4 <= n {
+                let mut c = [f32x4_splat(0.0); 4];
+                for inner in 0..k {
+                    let x = v128_load(b.add(inner * n + j) as *const v128);
+                    for r in 0..4 {
+                        c[r] = f32x4_add(c[r], f32x4_mul(f32x4_splat(*rows[r].add(inner)), x));
+                    }
+                }
+                for r in 0..4 {
+                    v128_store(out.add((i + r) * n + j) as *mut v128, c[r]);
+                }
+                j += 4;
+            }
+        }
+        for r in i..i + 4 {
+            for column in j..n {
+                scalar(r, column);
+            }
+        }
+        i += 4;
+    }
+    for r in i..m {
+        for column in 0..n {
+            scalar(r, column);
+        }
+    }
 }
 
 /// How many threads the kernels use: every vCPU by default, since a Lambda's

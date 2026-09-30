@@ -115,15 +115,25 @@ impl SplitSession {
         self.window.len() * 8
     }
 
-    /// Input is one framed 192 kbps stereo Opus stream, including a zero-padded short tail.
-    pub fn request(&self, index: usize) -> Result<Vec<u8>, String> {
+    fn input_segment(&self, index: usize) -> Result<[Vec<f32>; 2], String> {
         let offset = *self.offsets.get(index).ok_or("Invalid segment index")?;
         let mut output = [vec![0.0; self.window.len()], vec![0.0; self.window.len()]];
         let count = self.window.len().min(self.frames() - offset);
         for (channel, out) in output.iter_mut().enumerate() {
             out[..count].copy_from_slice(&self.input[channel][offset..offset + count]);
         }
-        stemsplits_transport::encode(&[output])
+        Ok(output)
+    }
+
+    /// Input is one framed 192 kbps stereo Opus stream, including a zero-padded short tail.
+    pub fn request(&self, index: usize) -> Result<Vec<u8>, String> {
+        stemsplits_transport::encode(&[self.input_segment(index)?])
+    }
+
+    /// The same segment as `request`, as planar f32 samples (left, then
+    /// right) for a model that runs on this device.
+    pub fn segment(&self, index: usize) -> Result<Vec<f32>, String> {
+        Ok(self.input_segment(index)?.concat())
     }
 
     /// Consume framed Opus responses in plan order. Return final samples, with eight planar channels.
@@ -133,6 +143,16 @@ impl SplitSession {
         }
         let pairs = stemsplits_transport::decode(response, 4, self.window.len())?;
         let samples: Vec<f32> = pairs.into_iter().flatten().flatten().collect();
+        self.accept_samples(index, &samples)
+    }
+
+    /// Consume one segment's stems as planar f32 samples, in plan order: drums,
+    /// bass, other and vocals, each left then right. Returns what `accept`
+    /// returns.
+    pub fn accept_samples(&mut self, index: usize, samples: &[f32]) -> Result<Vec<f32>, String> {
+        if index != self.next || index >= self.count() {
+            return Err("Unexpected segment order".into());
+        }
         if samples.len() != self.response_samples() || samples.iter().any(|s| !s.is_finite()) {
             return Err("Invalid stem response".into());
         }
@@ -239,6 +259,46 @@ mod tests {
             assert_eq!(expected.finish(), actual);
         }
     }
+    #[test]
+    fn local_segments_use_the_same_plan_and_seam() {
+        let total = 700_001;
+        let input: Vec<i16> = (0..total * 2)
+            .map(|i| ((i * 37) % 2001) as i16 - 1000)
+            .collect();
+        let mut session = SplitSession::new(&input, 2, RATE).unwrap();
+        let mut batch: [OverlapAdd; 8] = std::array::from_fn(|_| OverlapAdd::new());
+        let mut actual: [Vec<f32>; 8] = std::array::from_fn(|_| Vec::new());
+        for index in 0..session.count() {
+            let segment = session.segment(index).unwrap();
+            assert_eq!(segment.len(), 2 * session.window.len());
+            let offset = session.offsets[index];
+            let count = session.window.len().min(total - offset);
+            assert_eq!(segment[..count], session.input[0][offset..offset + count]);
+            assert!(segment[count..session.window.len()]
+                .iter()
+                .all(|s| *s == 0.0));
+            // A stand-in model: each stem is the input scaled by its index.
+            let samples: Vec<f32> = (0..4)
+                .flat_map(|stem| segment.iter().map(move |s| s * (stem + 1) as f32))
+                .collect();
+            for (accumulator, channel) in batch
+                .iter_mut()
+                .zip(samples.chunks_exact(session.window.len()))
+            {
+                accumulator.add(offset, channel, &session.window);
+            }
+            let output = session.accept_samples(index, &samples).unwrap();
+            let frames = output.len() / 8;
+            for (out, channel) in actual.iter_mut().zip(output.chunks_exact(frames)) {
+                out.extend_from_slice(channel);
+            }
+        }
+        for (mut expected, actual) in batch.into_iter().zip(actual) {
+            assert_eq!(expected.finish(), actual);
+        }
+        assert!(session.accept_samples(0, &[0.0; 8]).is_err());
+    }
+
     #[test]
     fn resampling_preserves_duration_channels_and_timing() {
         for rate in [22_050, 48_000, 96_000] {

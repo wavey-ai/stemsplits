@@ -7,6 +7,7 @@ members = [
     "crates/stemsplits-htdemucs",
     "crates/stemsplits-transport",
     "crates/stemsplits-web",
+    "crates/stemsplits-wasm",
 ]
 
 [workspace.package]

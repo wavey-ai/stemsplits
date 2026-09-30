@@ -52,7 +52,7 @@ impl Bundle {
         if bundle.version != 1 {
             bail!("unsupported bundle version {}", bundle.version);
         }
-        if bundle.weights.dtype != "f32" {
+        if !matches!(bundle.weights.dtype.as_str(), "f32" | "f16") {
             bail!("unsupported weight dtype {}", bundle.weights.dtype);
         }
         Ok(bundle)
@@ -81,6 +81,23 @@ impl Weights {
         let bundle = Bundle::from_json(&manifest)?;
         let path = directory.join(&bundle.weights.file);
         let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        let digest = sha256_hex(&bytes);
+        Self::from_parts(bundle, directory.to_path_buf(), bytes, &digest)
+    }
+
+    /// Verifies a manifest and its weight blob held in memory. `digest` is
+    /// the blob's SHA-256 in hex: a browser computes it with WebCrypto, which
+    /// is faster than hashing in WASM.
+    pub fn from_bytes(manifest: &str, bytes: Vec<u8>, digest: &str) -> Result<Self> {
+        Self::from_parts(Bundle::from_json(manifest)?, PathBuf::new(), bytes, digest)
+    }
+
+    fn from_parts(
+        mut bundle: Bundle,
+        directory: PathBuf,
+        bytes: Vec<u8>,
+        digest: &str,
+    ) -> Result<Self> {
         if bytes.len() != bundle.weights.byte_length {
             bail!(
                 "weight blob is {} bytes, manifest says {}",
@@ -88,14 +105,27 @@ impl Weights {
                 bundle.weights.byte_length
             );
         }
-        let digest = Sha256::digest(&bytes);
-        let digest = digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
         if digest != bundle.weights.sha256 {
             bail!("weight blob sha256 {digest} does not match the manifest");
         }
+        // An f16 blob holds the f32 blob's values in the same order. The
+        // compute is f32, so the weights widen here and every offset doubles.
+        let bytes = if bundle.weights.dtype == "f16" {
+            for tensor in &mut bundle.tensors {
+                tensor.offset *= 2;
+                tensor.dtype = "f32".into();
+            }
+            bytes
+                .chunks_exact(2)
+                .flat_map(|pair| {
+                    half::f16::from_le_bytes([pair[0], pair[1]])
+                        .to_f32()
+                        .to_le_bytes()
+                })
+                .collect()
+        } else {
+            bytes
+        };
         let index = bundle
             .tensors
             .iter()
@@ -104,7 +134,7 @@ impl Weights {
             .collect();
         Ok(Self {
             bundle,
-            directory: directory.to_path_buf(),
+            directory,
             bytes,
             index,
         })
@@ -155,6 +185,14 @@ impl<'a> Tensor<'a> {
 /// The blob is little-endian f32; on the supported targets that is the native
 /// layout, so the bytes reinterpret without a copy. A big-endian target would
 /// need a conversion here.
+/// SHA-256 of `bytes`, in lowercase hex.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn bytemuck_f32(bytes: &[u8]) -> &[f32] {
     assert_eq!(bytes.len() % 4, 0, "weight bytes are f32");
     let pointer = bytes.as_ptr() as *const f32;

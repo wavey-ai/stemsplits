@@ -25,7 +25,8 @@ ONNX export folds constants more aggressively.
 
 Artifact size: the Rust binary is ~1 MB and self-contained; ONNX Runtime adds
 58.4 MB here as a Python extension (~15–20 MB for the bare shared library).
-The f32 weights are 168 MB either way; an f16 bundle is planned.
+The f32 weights are 168 MB either way. The f16 bundle is 84 MB and gives
+the same weights.
 
 ## The kernel pass
 
@@ -49,6 +50,45 @@ The GEMM is `crates/stemsplits-htdemucs/kernels/gemm.c`, compiled by
 accumulation order is preserved, so FMA contraction alone moves the result,
 inside the parity tolerance (stems stay at 2.99e-6). The approach mirrors
 [encodec-rs](https://github.com/wavey-ai/encodec-rs).
+
+## WASM
+
+One 7.8 s segment on an Apple M-series Mac with 8 cores, in Node 26 with one
+thread. The input is the seeded segment of the `segment` example.
+
+| change | seconds | RTF |
+| --- | ---: | ---: |
+| native build, one thread | 9.25 | 1.19 |
+| WASM SIMD128, one row by 16 columns | 25.7 | 3.29 |
+| WASM SIMD128, four rows by 16 columns | 15.3 | 1.96 |
+| polynomial `exp` in the softmax, `f32.nearest` rounding | 13.8 | 1.77 |
+
+The WASM output is −121 dB from the native output. The largest sample
+difference is 1.8e-6.
+
+Model load in WASM took 9.7 s with the f32 bundle. SHA-256 in WASM used 9.5 s
+of that time. With the f16 bundle and a WebCrypto digest, the load takes
+0.33 s.
+
+Workers in Node, two segments for each worker:
+
+| workers | seconds per segment |
+| ---: | ---: |
+| 1 | 14.1 |
+| 2 | 7.8 |
+| 4 | 5.7 |
+| 6 | 5.9 |
+
+A 193 s track (33 segments) through `splitSegmentsLocal` with four workers:
+
+| browser | seconds | RTF |
+| --- | ---: | ---: |
+| Chromium, headless | 173 | 0.90 |
+| WebKit, headless | 183 | 0.95 |
+
+The two browsers gave the same 16-bit stems, byte for byte. The sum of the
+browser stems was −31.4 dB from the mix. The sum of the cloud stems for the
+same mix, with Opus in both directions, was −17.6 dB from the mix.
 
 ## Reproduce
 

@@ -120,12 +120,14 @@ impl HtDemucs {
     /// `magnitude` is `[B, 4, Fr, T]` (CaC), `waveform` is `[B, 2, N]`.
     /// Returns `(freq [B, 16, Fr, T], time [B, 8, N])`, both denormalised.
     pub fn forward(&self, magnitude: &Tensor, waveform: &Tensor) -> (Tensor, Tensor) {
-        let profile = std::env::var_os("STEMSPLITS_PROFILE").is_some();
-        let mut mark = std::time::Instant::now();
+        // wasm32-unknown-unknown has no clock, so it has no profile.
+        let profile =
+            cfg!(not(target_arch = "wasm32")) && std::env::var_os("STEMSPLITS_PROFILE").is_some();
+        let mut mark = profile.then(std::time::Instant::now);
         let mut lap = |name: &str| {
-            if profile {
-                eprintln!("  {name}: {:.1} ms", mark.elapsed().as_secs_f64() * 1e3);
-                mark = std::time::Instant::now();
+            if let Some(start) = mark.as_mut() {
+                eprintln!("  {name}: {:.1} ms", start.elapsed().as_secs_f64() * 1e3);
+                *start = std::time::Instant::now();
             }
         };
 
