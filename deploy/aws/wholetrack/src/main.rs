@@ -76,8 +76,8 @@ fn decode_source(bytes: &[u8]) -> Result<(Vec<i16>, usize, usize), Error> {
                 }
                 pcm.push((value * 32768.0).round().clamp(-32768.0, 32767.0) as i16);
             }
-            if pcm.len() > rate * channels * 300 {
-                return Err("Source exceeds five minutes".into());
+            if pcm.len() > rate * channels * 1800 {
+                return Err("Source exceeds thirty minutes".into());
             }
         }
     }
