@@ -13,7 +13,7 @@ use soundkit_stream::{encode_interleaved_i16_to_opus_soundkit_stream, PcmOpusStr
 use stemsplits_web::SplitSession;
 
 const ROLES: [&str; 4] = ["drums", "bass", "other", "vocals"];
-const MAX_SOURCE_BYTES: usize = 200_000_000;
+const MAX_SOURCE_BYTES: usize = 600_000_000;
 const MAX_RESPONSE_BYTES: usize = 3_000_000;
 /// Segment requests in flight at once. A segment takes about 60 s in the
 /// segment service, which scales per request, so the window sets the
