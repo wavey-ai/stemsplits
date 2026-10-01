@@ -14,6 +14,8 @@ use stemsplits_web::SplitSession;
 
 const ROLES: [&str; 4] = ["drums", "bass", "other", "vocals"];
 const MAX_SOURCE_BYTES: usize = 600_000_000;
+/// The longest source that the worker separates.
+const MAX_SECONDS: usize = 1800;
 const MAX_RESPONSE_BYTES: usize = 3_000_000;
 /// Segment requests in flight at once. A segment takes about 60 s in the
 /// segment service, which scales per request, so the window sets the
@@ -76,7 +78,7 @@ fn decode_source(bytes: &[u8]) -> Result<(Vec<i16>, usize, usize), Error> {
                 }
                 pcm.push((value * 32768.0).round().clamp(-32768.0, 32767.0) as i16);
             }
-            if pcm.len() > rate * channels * 1800 {
+            if pcm.len() > rate * channels * MAX_SECONDS {
                 return Err("Source exceeds thirty minutes".into());
             }
         }
@@ -204,7 +206,7 @@ async fn run_job(request: &Request, s3: &S3Client, lambda: &LambdaClient) -> Res
     }
     let bytes = input.body.collect().await?.into_bytes();
     let (pcm, channels, rate) = decode_source(&bytes)?;
-    let mut session = SplitSession::new(&pcm, channels, rate)?;
+    let mut session = SplitSession::with_limit(&pcm, channels, rate, MAX_SECONDS)?;
     let (endpoint, key) = (
         std::env::var("STEMS_ENDPOINT")?,
         std::env::var("STEMS_API_KEY")?,

@@ -4,8 +4,15 @@ use stemsplits_demucs::{triangular_weight, ChunkPlan, OverlapAdd, StemKind};
 use wasm_bindgen::prelude::*;
 
 const RATE: usize = 44_100;
+/// The longest track that the browser separates.
+const BROWSER_SECONDS: usize = 600;
 
-fn prepare(samples: &[i16], channels: usize, rate: usize) -> Result<[Vec<f32>; 2], String> {
+fn prepare(
+    samples: &[i16],
+    channels: usize,
+    rate: usize,
+    max_seconds: usize,
+) -> Result<[Vec<f32>; 2], String> {
     if !(1..=2).contains(&channels)
         || !(8_000..=192_000).contains(&rate)
         || samples.is_empty()
@@ -14,8 +21,11 @@ fn prepare(samples: &[i16], channels: usize, rate: usize) -> Result<[Vec<f32>; 2
         return Err("Choose a mono or stereo audio track.".into());
     }
     let frames = samples.len() / channels;
-    if frames > rate * 600 {
-        return Err("Choose a track up to 10 minutes long.".into());
+    if frames > rate * max_seconds {
+        return Err(format!(
+            "Choose a track up to {} minutes long.",
+            max_seconds / 60
+        ));
     }
     let input: [Vec<f32>; 2] = std::array::from_fn(|channel| {
         samples
@@ -90,11 +100,15 @@ pub struct SplitSession {
     flushed: usize,
 }
 
-#[wasm_bindgen]
 impl SplitSession {
-    #[wasm_bindgen(constructor)]
-    pub fn new(samples: &[i16], channels: usize, rate: usize) -> Result<SplitSession, String> {
-        let input = prepare(samples, channels, rate)?;
+    /// A session for a server worker, which accepts tracks up to `max_seconds`.
+    pub fn with_limit(
+        samples: &[i16],
+        channels: usize,
+        rate: usize,
+        max_seconds: usize,
+    ) -> Result<SplitSession, String> {
+        let input = prepare(samples, channels, rate, max_seconds)?;
         Ok(Self {
             offsets: ChunkPlan::CONTRACT.offsets(input[0].len()),
             window: triangular_weight(ChunkPlan::CONTRACT.segment_frames()),
@@ -103,6 +117,14 @@ impl SplitSession {
             next: 0,
             flushed: 0,
         })
+    }
+}
+
+#[wasm_bindgen]
+impl SplitSession {
+    #[wasm_bindgen(constructor)]
+    pub fn new(samples: &[i16], channels: usize, rate: usize) -> Result<SplitSession, String> {
+        Self::with_limit(samples, channels, rate, BROWSER_SECONDS)
     }
 
     pub fn frames(&self) -> usize {
@@ -300,6 +322,17 @@ mod tests {
     }
 
     #[test]
+    fn a_worker_session_accepts_a_track_longer_than_the_browser_limit() {
+        let rate = 8_000;
+        let samples = vec![0_i16; rate * (BROWSER_SECONDS + 1)];
+        assert_eq!(
+            prepare(&samples, 1, rate, BROWSER_SECONDS).unwrap_err(),
+            "Choose a track up to 10 minutes long."
+        );
+        assert!(prepare(&samples, 1, rate, 1800).is_ok());
+    }
+
+    #[test]
     fn resampling_preserves_duration_channels_and_timing() {
         for rate in [22_050, 48_000, 96_000] {
             let samples: Vec<i16> = (0..rate)
@@ -310,7 +343,7 @@ mod tests {
                     [tone, -tone]
                 })
                 .collect();
-            let output = prepare(&samples, 2, rate).unwrap();
+            let output = prepare(&samples, 2, rate, BROWSER_SECONDS).unwrap();
             assert_eq!(output[0].len(), RATE);
             for (frame, actual) in output[0].iter().enumerate().take(RATE - 1000).skip(1000) {
                 let expected =
