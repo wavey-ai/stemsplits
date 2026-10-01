@@ -21,9 +21,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 rubato = "=0.14.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-soundkit = { git = "https://github.com/wavey-ai/soundkit.git", rev = "15c2cc0ff08619e73b37c5290387c370cc4f9ea0", default-features = false }
-soundkit-library = { package = "soundkit-wasm", git = "https://github.com/wavey-ai/soundkit.git", rev = "15c2cc0ff08619e73b37c5290387c370cc4f9ea0", default-features = false, features = ["detect", "flac"] }
-soundkit-stream = { git = "https://github.com/wavey-ai/soundkit.git", rev = "15c2cc0ff08619e73b37c5290387c370cc4f9ea0" }
+soundkit = { git = "https://github.com/wavey-ai/soundkit.git", rev = "000b6e361d6a150089f6333f3ae5a05234c3b3f6", default-features = false }
+soundkit-library = { package = "soundkit-wasm", git = "https://github.com/wavey-ai/soundkit.git", rev = "000b6e361d6a150089f6333f3ae5a05234c3b3f6", default-features = false, features = ["detect", "flac"] }
+soundkit-stream = { git = "https://github.com/wavey-ai/soundkit.git", rev = "000b6e361d6a150089f6333f3ae5a05234c3b3f6" }
 stemsplits-web = { path = "../../../crates/stemsplits-web" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 

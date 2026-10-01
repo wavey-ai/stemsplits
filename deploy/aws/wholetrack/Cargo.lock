@@ -2407,11 +2407,12 @@ dependencies = [
 [[package]]
 name = "soundkit"
 version = "0.13.3"
-source = "git+https://github.com/wavey-ai/soundkit.git?rev=15c2cc0ff08619e73b37c5290387c370cc4f9ea0#15c2cc0ff08619e73b37c5290387c370cc4f9ea0"
+source = "git+https://github.com/wavey-ai/soundkit.git?rev=000b6e361d6a150089f6333f3ae5a05234c3b3f6#000b6e361d6a150089f6333f3ae5a05234c3b3f6"
 dependencies = [
  "byteorder",
  "bytes",
  "chacha20poly1305",
+ "crc32fast",
  "frame-header",
  "serde",
 ]
@@ -2431,14 +2432,14 @@ dependencies = [
 [[package]]
 name = "soundkit-flac"
 version = "0.13.3"
-source = "git+https://github.com/wavey-ai/soundkit.git?rev=15c2cc0ff08619e73b37c5290387c370cc4f9ea0#15c2cc0ff08619e73b37c5290387c370cc4f9ea0"
+source = "git+https://github.com/wavey-ai/soundkit.git?rev=000b6e361d6a150089f6333f3ae5a05234c3b3f6#000b6e361d6a150089f6333f3ae5a05234c3b3f6"
 dependencies = [
  "heapless",
  "md-5 0.10.6",
  "num-traits",
  "rustversion",
  "seq-macro",
- "soundkit 0.13.3 (git+https://github.com/wavey-ai/soundkit.git?rev=15c2cc0ff08619e73b37c5290387c370cc4f9ea0)",
+ "soundkit 0.13.3 (git+https://github.com/wavey-ai/soundkit.git?rev=000b6e361d6a150089f6333f3ae5a05234c3b3f6)",
 ]
 
 [[package]]
@@ -2457,10 +2458,10 @@ dependencies = [
 [[package]]
 name = "soundkit-opus"
 version = "0.13.3"
-source = "git+https://github.com/wavey-ai/soundkit.git?rev=15c2cc0ff08619e73b37c5290387c370cc4f9ea0#15c2cc0ff08619e73b37c5290387c370cc4f9ea0"
+source = "git+https://github.com/wavey-ai/soundkit.git?rev=000b6e361d6a150089f6333f3ae5a05234c3b3f6#000b6e361d6a150089f6333f3ae5a05234c3b3f6"
 dependencies = [
  "frame-header",
- "soundkit 0.13.3 (git+https://github.com/wavey-ai/soundkit.git?rev=15c2cc0ff08619e73b37c5290387c370cc4f9ea0)",
+ "soundkit 0.13.3 (git+https://github.com/wavey-ai/soundkit.git?rev=000b6e361d6a150089f6333f3ae5a05234c3b3f6)",
  "tracing",
  "wide",
 ]
@@ -2479,12 +2480,13 @@ dependencies = [
 [[package]]
 name = "soundkit-stream"
 version = "0.13.3"
-source = "git+https://github.com/wavey-ai/soundkit.git?rev=15c2cc0ff08619e73b37c5290387c370cc4f9ea0#15c2cc0ff08619e73b37c5290387c370cc4f9ea0"
+source = "git+https://github.com/wavey-ai/soundkit.git?rev=000b6e361d6a150089f6333f3ae5a05234c3b3f6#000b6e361d6a150089f6333f3ae5a05234c3b3f6"
 dependencies = [
+ "crc32fast",
  "frame-header",
- "soundkit-flac 0.13.3 (git+https://github.com/wavey-ai/soundkit.git?rev=15c2cc0ff08619e73b37c5290387c370cc4f9ea0)",
- "soundkit-opus 0.13.3 (git+https://github.com/wavey-ai/soundkit.git?rev=15c2cc0ff08619e73b37c5290387c370cc4f9ea0)",
- "soundkit-visuals 0.1.0 (git+https://github.com/wavey-ai/soundkit.git?rev=15c2cc0ff08619e73b37c5290387c370cc4f9ea0)",
+ "soundkit-flac 0.13.3 (git+https://github.com/wavey-ai/soundkit.git?rev=000b6e361d6a150089f6333f3ae5a05234c3b3f6)",
+ "soundkit-opus 0.13.3 (git+https://github.com/wavey-ai/soundkit.git?rev=000b6e361d6a150089f6333f3ae5a05234c3b3f6)",
+ "soundkit-visuals 0.1.0 (git+https://github.com/wavey-ai/soundkit.git?rev=000b6e361d6a150089f6333f3ae5a05234c3b3f6)",
 ]
 
 [[package]]
@@ -2501,7 +2503,7 @@ dependencies = [
 [[package]]
 name = "soundkit-visuals"
 version = "0.1.0"
-source = "git+https://github.com/wavey-ai/soundkit.git?rev=15c2cc0ff08619e73b37c5290387c370cc4f9ea0#15c2cc0ff08619e73b37c5290387c370cc4f9ea0"
+source = "git+https://github.com/wavey-ai/soundkit.git?rev=000b6e361d6a150089f6333f3ae5a05234c3b3f6#000b6e361d6a150089f6333f3ae5a05234c3b3f6"
 
 [[package]]
 name = "soundkit-visuals"
@@ -2511,14 +2513,14 @@ source = "git+https://github.com/wavey-ai/soundkit.git?rev=2fe6a85f56b9adc2da46c
 [[package]]
 name = "soundkit-wasm"
 version = "0.13.3"
-source = "git+https://github.com/wavey-ai/soundkit.git?rev=15c2cc0ff08619e73b37c5290387c370cc4f9ea0#15c2cc0ff08619e73b37c5290387c370cc4f9ea0"
+source = "git+https://github.com/wavey-ai/soundkit.git?rev=000b6e361d6a150089f6333f3ae5a05234c3b3f6#000b6e361d6a150089f6333f3ae5a05234c3b3f6"
 dependencies = [
  "access-unit",
  "frame-header",
  "js-sys",
  "sha2 0.10.9",
- "soundkit 0.13.3 (git+https://github.com/wavey-ai/soundkit.git?rev=15c2cc0ff08619e73b37c5290387c370cc4f9ea0)",
- "soundkit-flac 0.13.3 (git+https://github.com/wavey-ai/soundkit.git?rev=15c2cc0ff08619e73b37c5290387c370cc4f9ea0)",
+ "soundkit 0.13.3 (git+https://github.com/wavey-ai/soundkit.git?rev=000b6e361d6a150089f6333f3ae5a05234c3b3f6)",
+ "soundkit-flac 0.13.3 (git+https://github.com/wavey-ai/soundkit.git?rev=000b6e361d6a150089f6333f3ae5a05234c3b3f6)",
  "wasm-bindgen",
 ]
 
@@ -2558,8 +2560,8 @@ dependencies = [
  "rubato",
  "serde",
  "serde_json",
- "soundkit 0.13.3 (git+https://github.com/wavey-ai/soundkit.git?rev=15c2cc0ff08619e73b37c5290387c370cc4f9ea0)",
- "soundkit-stream 0.13.3 (git+https://github.com/wavey-ai/soundkit.git?rev=15c2cc0ff08619e73b37c5290387c370cc4f9ea0)",
+ "soundkit 0.13.3 (git+https://github.com/wavey-ai/soundkit.git?rev=000b6e361d6a150089f6333f3ae5a05234c3b3f6)",
+ "soundkit-stream 0.13.3 (git+https://github.com/wavey-ai/soundkit.git?rev=000b6e361d6a150089f6333f3ae5a05234c3b3f6)",
  "soundkit-wasm",
  "stemsplits-web",
  "tokio",
