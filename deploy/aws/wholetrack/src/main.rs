@@ -20,7 +20,10 @@ const MAX_RESPONSE_BYTES: usize = 3_000_000;
 /// Segment requests in flight at once. A segment takes about 60 s in the
 /// segment service, which scales per request, so the window sets the
 /// separation time: a 26-minute recording has 231 segments.
-const SEGMENT_CONCURRENCY: usize = 48;
+const SEGMENT_CONCURRENCY: usize = 128;
+/// Stems encoded at a time: the worker has two vCPUs, and each encode holds
+/// a 48 kHz copy of its stem.
+const ENCODE_PARALLEL: usize = 2;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -154,6 +157,24 @@ fn to_opus_rate(pcm: &[i16]) -> Result<Vec<i16>, Error> {
     Ok(interleaved)
 }
 
+fn encode_stem(samples: Vec<i16>, expected_samples: usize) -> Result<Vec<u8>, Error> {
+    if samples.len() != expected_samples {
+        return Err("Reconstructed stem duration changed".into());
+    }
+    let opus_pcm = to_opus_rate(&samples)?;
+    drop(samples);
+    Ok(encode_interleaved_i16_to_opus_soundkit_stream(
+        &opus_pcm,
+        PcmOpusStreamOptions {
+            sample_rate: 48_000,
+            channels: 2,
+            bitrate: 192_000,
+            ..PcmOpusStreamOptions::default()
+        },
+    )?
+    .stream)
+}
+
 fn retryable(status: reqwest::StatusCode) -> bool {
     status.is_server_error() || [408, 425, 429].contains(&status.as_u16())
 }
@@ -258,27 +279,35 @@ async fn run_job(request: &Request, s3: &S3Client, lambda: &LambdaClient) -> Res
     }
     let expected_samples = session.frames() * 2;
     drop(session);
-    for (samples, object_key) in output.into_iter().zip(&keys) {
-        if samples.len() != expected_samples {
-            return Err("Reconstructed stem duration changed".into());
+    let mut encoded = Vec::with_capacity(keys.len());
+    let mut stems = output.into_iter();
+    loop {
+        let batch: Vec<Vec<i16>> = stems.by_ref().take(ENCODE_PARALLEL).collect();
+        if batch.is_empty() {
+            break;
         }
-        let opus_pcm = to_opus_rate(&samples)?;
-        let encoded = encode_interleaved_i16_to_opus_soundkit_stream(
-            &opus_pcm,
-            PcmOpusStreamOptions {
-                sample_rate: 48_000,
-                channels: 2,
-                bitrate: 192_000,
-                ..PcmOpusStreamOptions::default()
-            },
-        )?;
+        let streams = tokio::task::block_in_place(|| {
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = batch
+                    .into_iter()
+                    .map(|samples| scope.spawn(move || encode_stem(samples, expected_samples)))
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().map_err(|_| "Stem encoder failed")?)
+                    .collect::<Result<Vec<_>, Error>>()
+            })
+        })?;
+        encoded.extend(streams);
+    }
+    for (stream, object_key) in encoded.into_iter().zip(&keys) {
         let put = s3
             .put_object()
             .bucket(&request.bucket)
             .key(object_key)
             .if_none_match("*")
             .content_type("application/octet-stream")
-            .body(ByteStream::from(encoded.stream.clone()))
+            .body(ByteStream::from(stream.clone()))
             .send()
             .await;
         if let Err(error) = put {
@@ -289,7 +318,7 @@ async fn run_job(request: &Request, s3: &S3Client, lambda: &LambdaClient) -> Res
                 .send()
                 .await?;
             let body = existing.body.collect().await?.into_bytes();
-            if body.as_ref() != encoded.stream.as_slice() {
+            if body.as_ref() != stream.as_slice() {
                 return Err(format!("Stem upload conflict: {error}").into());
             }
         }
