@@ -114,38 +114,42 @@ fn quantize(value: f32) -> i16 {
 }
 
 fn to_opus_rate(pcm: &[i16]) -> Result<Vec<i16>, Error> {
+    // Resample one block at a time: a 30-minute stem as f32 is 1.2 GB.
     let frames = pcm.len() / 2;
-    let input: [Vec<f32>; 2] = std::array::from_fn(|ch| {
-        pcm.chunks_exact(2)
-            .map(|frame| frame[ch] as f32 / 32768.0)
-            .collect()
-    });
     let mut resampler = FftFixedInOut::<f32>::new(44_100, 48_000, 1280, 2)?;
     let delay = resampler.output_delay();
     let total = ((frames as u64 * 48_000 + 22_050) / 44_100) as usize;
-    let mut output: [Vec<f32>; 2] = std::array::from_fn(|_| Vec::new());
-    let mut position = 0;
-    while output[0].len() < total + delay {
+    let mut interleaved = Vec::with_capacity(total * 2);
+    let (mut produced, mut position) = (0, 0);
+    let mut block_input: [Vec<f32>; 2] = std::array::from_fn(|_| Vec::new());
+    while produced < total + delay {
         let count = resampler.input_frames_next();
         let available = frames.saturating_sub(position).min(count);
-        let slices = [
-            &input[0][position..position + available],
-            &input[1][position..position + available],
-        ];
-        let block =
-            resampler.process_partial(if available == 0 { None } else { Some(&slices) }, None)?;
-        for channel in 0..2 {
-            output[channel].extend_from_slice(&block[channel]);
+        for (channel, input) in block_input.iter_mut().enumerate() {
+            input.clear();
+            input.extend(
+                pcm[position * 2..(position + available) * 2]
+                    .chunks_exact(2)
+                    .map(|frame| frame[channel] as f32 / 32768.0),
+            );
         }
+        let block = resampler.process_partial(
+            if available == 0 {
+                None
+            } else {
+                Some(&block_input)
+            },
+            None,
+        )?;
+        for (index, (&left, &right)) in block[0].iter().zip(&block[1]).enumerate() {
+            let frame = produced + index;
+            if (delay..delay + total).contains(&frame) {
+                interleaved.push(quantize(left));
+                interleaved.push(quantize(right));
+            }
+        }
+        produced += block[0].len();
         position += available;
-    }
-    let mut interleaved = Vec::with_capacity(total * 2);
-    for (&left, &right) in output[0][delay..delay + total]
-        .iter()
-        .zip(&output[1][delay..delay + total])
-    {
-        interleaved.push(quantize(left));
-        interleaved.push(quantize(right));
     }
     Ok(interleaved)
 }
@@ -204,9 +208,13 @@ async fn run_job(request: &Request, s3: &S3Client, lambda: &LambdaClient) -> Res
     if input.content_length().unwrap_or(0) > MAX_SOURCE_BYTES as i64 {
         return Err("Source size exceeds mastering limit".into());
     }
-    let bytes = input.body.collect().await?.into_bytes();
-    let (pcm, channels, rate) = decode_source(&bytes)?;
-    let mut session = SplitSession::with_limit(&pcm, channels, rate, MAX_SECONDS)?;
+    // Free the source and its PCM once the session holds the model input.
+    let mut session = {
+        let bytes = input.body.collect().await?.into_bytes();
+        let (pcm, channels, rate) = decode_source(&bytes)?;
+        drop(bytes);
+        SplitSession::with_limit(&pcm, channels, rate, MAX_SECONDS)?
+    };
     let (endpoint, key) = (
         std::env::var("STEMS_ENDPOINT")?,
         std::env::var("STEMS_API_KEY")?,
@@ -214,7 +222,8 @@ async fn run_job(request: &Request, s3: &S3Client, lambda: &LambdaClient) -> Res
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(180))
         .build()?;
-    let mut output: [Vec<i16>; 4] = std::array::from_fn(|_| Vec::new());
+    let mut output: [Vec<i16>; 4] =
+        std::array::from_fn(|_| Vec::with_capacity(session.frames() * 2));
     // Keep the window full; join the stems in segment order as each next
     // segment arrives.
     let count = session.count();
@@ -248,6 +257,7 @@ async fn run_job(request: &Request, s3: &S3Client, lambda: &LambdaClient) -> Res
         return Err("Stem segments missing".into());
     }
     let expected_samples = session.frames() * 2;
+    drop(session);
     for (samples, object_key) in output.into_iter().zip(&keys) {
         if samples.len() != expected_samples {
             return Err("Reconstructed stem duration changed".into());
@@ -351,6 +361,54 @@ async fn main() -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn to_opus_rate_whole(pcm: &[i16]) -> Result<Vec<i16>, Error> {
+        let frames = pcm.len() / 2;
+        let input: [Vec<f32>; 2] = std::array::from_fn(|ch| {
+            pcm.chunks_exact(2)
+                .map(|frame| frame[ch] as f32 / 32768.0)
+                .collect()
+        });
+        let mut resampler = FftFixedInOut::<f32>::new(44_100, 48_000, 1280, 2)?;
+        let delay = resampler.output_delay();
+        let total = ((frames as u64 * 48_000 + 22_050) / 44_100) as usize;
+        let mut output: [Vec<f32>; 2] = std::array::from_fn(|_| Vec::new());
+        let mut position = 0;
+        while output[0].len() < total + delay {
+            let count = resampler.input_frames_next();
+            let available = frames.saturating_sub(position).min(count);
+            let slices = [
+                &input[0][position..position + available],
+                &input[1][position..position + available],
+            ];
+            let block = resampler
+                .process_partial(if available == 0 { None } else { Some(&slices) }, None)?;
+            for channel in 0..2 {
+                output[channel].extend_from_slice(&block[channel]);
+            }
+            position += available;
+        }
+        let mut interleaved = Vec::with_capacity(total * 2);
+        for (&left, &right) in output[0][delay..delay + total]
+            .iter()
+            .zip(&output[1][delay..delay + total])
+        {
+            interleaved.push(quantize(left));
+            interleaved.push(quantize(right));
+        }
+        Ok(interleaved)
+    }
+
+    #[test]
+    fn block_resampling_matches_the_whole_resampling() {
+        let pcm: Vec<i16> = (0..2 * 100_003)
+            .map(|i| ((i * 7919) % 30_011) as i16 - 15_000)
+            .collect();
+        assert_eq!(
+            to_opus_rate(&pcm).unwrap(),
+            to_opus_rate_whole(&pcm).unwrap()
+        );
+    }
 
     #[test]
     fn job_requires_exact_source_and_four_role_keys() {

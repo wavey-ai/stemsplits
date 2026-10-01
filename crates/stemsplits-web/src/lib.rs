@@ -48,7 +48,8 @@ fn prepare(
     let delay = resampler.output_delay();
     // WASM uses 32-bit usize. Multiply the frame count in u64.
     let total = ((frames as u64 * RATE as u64 + rate as u64 / 2) / rate as u64).max(1) as usize;
-    let mut output = [Vec::new(), Vec::new()];
+    let mut output: [Vec<f32>; 2] =
+        std::array::from_fn(|_| Vec::with_capacity(total + delay + chunk * 2));
     let mut position = 0;
     while output[0].len() < total + delay {
         let count = resampler.input_frames_next();
@@ -65,7 +66,12 @@ fn prepare(
         }
         position += available;
     }
-    Ok(output.map(|channel| channel[delay..delay + total].to_vec()))
+    // Trim in place: a copy of a 30-minute input is 0.6 GB.
+    Ok(output.map(|mut channel| {
+        channel.truncate(delay + total);
+        channel.drain(..delay);
+        channel
+    }))
 }
 
 #[wasm_bindgen]
