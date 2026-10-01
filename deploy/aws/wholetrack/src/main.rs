@@ -2,7 +2,7 @@
 use aws_sdk_lambda::{primitives::Blob, types::InvocationType, Client as LambdaClient};
 use aws_sdk_s3::{primitives::ByteStream, Client as S3Client};
 use frame_header::EncodingFlag;
-use futures::future::try_join_all;
+use futures::stream::{FuturesUnordered, StreamExt};
 use lambda_runtime::{service_fn, Error, LambdaEvent};
 use rubato::{FftFixedInOut, Resampler};
 use serde::Deserialize;
@@ -15,6 +15,10 @@ use stemsplits_web::SplitSession;
 const ROLES: [&str; 4] = ["drums", "bass", "other", "vocals"];
 const MAX_SOURCE_BYTES: usize = 200_000_000;
 const MAX_RESPONSE_BYTES: usize = 3_000_000;
+/// Segment requests in flight at once. A segment takes about 60 s in the
+/// segment service, which scales per request, so the window sets the
+/// separation time: a 26-minute recording has 231 segments.
+const SEGMENT_CONCURRENCY: usize = 48;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -209,23 +213,37 @@ async fn run_job(request: &Request, s3: &S3Client, lambda: &LambdaClient) -> Res
         .timeout(std::time::Duration::from_secs(180))
         .build()?;
     let mut output: [Vec<i16>; 4] = std::array::from_fn(|_| Vec::new());
-    for start in (0..session.count()).step_by(8) {
-        let stop = (start + 8).min(session.count());
-        let calls = (start..stop).map(|index| {
-            let body = session.request(index);
-            let client = client.clone();
-            let endpoint = endpoint.clone();
-            let key = key.clone();
-            async move {
+    // Keep the window full; join the stems in segment order as each next
+    // segment arrives.
+    let count = session.count();
+    let mut in_flight = FuturesUnordered::new();
+    let mut waiting = std::collections::BTreeMap::new();
+    let (mut issued, mut joined) = (0usize, 0usize);
+    loop {
+        while issued < count && in_flight.len() < SEGMENT_CONCURRENCY {
+            let index = issued;
+            let body = session.request(index)?;
+            let (client, endpoint, key) = (client.clone(), endpoint.clone(), key.clone());
+            in_flight.push(async move {
                 Ok::<_, Error>((
                     index,
-                    separate_segment(&client, &endpoint, &key, body?, index).await?,
+                    separate_segment(&client, &endpoint, &key, body, index).await?,
                 ))
-            }
-        });
-        for (index, response) in try_join_all(calls).await? {
-            append_planar(&mut output, &session.accept(index, &response)?)?;
+            });
+            issued += 1;
         }
+        let Some(result) = in_flight.next().await else {
+            break;
+        };
+        let (index, response) = result?;
+        waiting.insert(index, response);
+        while let Some(response) = waiting.remove(&joined) {
+            append_planar(&mut output, &session.accept(joined, &response)?)?;
+            joined += 1;
+        }
+    }
+    if joined != count {
+        return Err("Stem segments missing".into());
     }
     let expected_samples = session.frames() * 2;
     for (samples, object_key) in output.into_iter().zip(&keys) {
