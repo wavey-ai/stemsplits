@@ -14,14 +14,246 @@ const FRAC_1_SQRT_2: f32 = std::f32::consts::FRAC_1_SQRT_2;
 /// `F.gelu`, the exact (`approximate = "none"`) form.
 pub fn gelu(x: &Tensor) -> Tensor {
     let mut data = x.data.clone();
-    crate::matmul::parallel_chunks(&mut data, |chunk| {
-        for value in chunk.iter_mut() {
-            *value = 0.5 * *value * (1.0 + libm::erff(*value * FRAC_1_SQRT_2));
-        }
-    });
+    crate::matmul::parallel_chunks(&mut data, gelu_in_place);
     Tensor {
         shape: x.shape.clone(),
         data,
+    }
+}
+
+fn gelu_one(value: f32) -> f32 {
+    0.5 * value * (1.0 + libm::erff(value * FRAC_1_SQRT_2))
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn gelu_in_place(values: &mut [f32]) {
+    for value in values {
+        *value = gelu_one(*value);
+    }
+}
+
+/// `gelu_one` four values at a time with `neon_erf::erf4`.
+#[cfg(target_arch = "aarch64")]
+fn gelu_in_place(values: &mut [f32]) {
+    use core::arch::aarch64::*;
+    let mut chunks = values.chunks_exact_mut(4);
+    for chunk in &mut chunks {
+        if chunk.iter().any(|value| !value.is_finite()) {
+            for value in chunk {
+                *value = gelu_one(*value);
+            }
+            continue;
+        }
+        // SAFETY: NEON is part of the aarch64 base architecture, and the
+        // chunk holds four values.
+        unsafe {
+            let v = vld1q_f32(chunk.as_ptr());
+            let erf = neon_erf::erf4(vmulq_n_f32(v, FRAC_1_SQRT_2));
+            let y = vmulq_f32(vmulq_n_f32(v, 0.5), vaddq_f32(vdupq_n_f32(1.0), erf));
+            vst1q_f32(chunk.as_mut_ptr(), y);
+        }
+    }
+    for value in chunks.into_remainder() {
+        *value = gelu_one(*value);
+    }
+}
+
+/// `libm::erff` and the `libm::expf` it calls, in NEON. Each lane computes
+/// every branch of `erff` with the same f32 operations in the same order,
+/// and keeps the branch of its value, so each lane gives the bits of
+/// `libm::erff`. The lanes must be finite.
+// The constants keep the digits of `libm`, so each f32 is the same.
+#[cfg(target_arch = "aarch64")]
+#[allow(clippy::excessive_precision)]
+pub(crate) mod neon_erf {
+    use core::arch::aarch64::*;
+
+    const ERX: f32 = 8.4506291151e-01;
+    const EFX8: f32 = 1.0270333290e+00;
+    const PP: [f32; 5] = [
+        1.2837916613e-01,
+        -3.2504209876e-01,
+        -2.8481749818e-02,
+        -5.7702702470e-03,
+        -2.3763017452e-05,
+    ];
+    const QQ: [f32; 5] = [
+        3.9791721106e-01,
+        6.5022252500e-02,
+        5.0813062117e-03,
+        1.3249473704e-04,
+        -3.9602282413e-06,
+    ];
+    const PA: [f32; 7] = [
+        -2.3621185683e-03,
+        4.1485610604e-01,
+        -3.7220788002e-01,
+        3.1834661961e-01,
+        -1.1089469492e-01,
+        3.5478305072e-02,
+        -2.1663755178e-03,
+    ];
+    const QA: [f32; 6] = [
+        1.0642088205e-01,
+        5.4039794207e-01,
+        7.1828655899e-02,
+        1.2617121637e-01,
+        1.3637083583e-02,
+        1.1984500103e-02,
+    ];
+    const RA: [f32; 8] = [
+        -9.8649440333e-03,
+        -6.9385856390e-01,
+        -1.0558626175e+01,
+        -6.2375331879e+01,
+        -1.6239666748e+02,
+        -1.8460508728e+02,
+        -8.1287437439e+01,
+        -9.8143291473e+00,
+    ];
+    const SA: [f32; 8] = [
+        1.9651271820e+01,
+        1.3765776062e+02,
+        4.3456588745e+02,
+        6.4538726807e+02,
+        4.2900814819e+02,
+        1.0863500214e+02,
+        6.5702495575e+00,
+        -6.0424413532e-02,
+    ];
+    const RB: [f32; 7] = [
+        -9.8649431020e-03,
+        -7.9928326607e-01,
+        -1.7757955551e+01,
+        -1.6063638306e+02,
+        -6.3756646729e+02,
+        -1.0250950928e+03,
+        -4.8351919556e+02,
+    ];
+    const SB: [f32; 7] = [
+        3.0338060379e+01,
+        3.2579251099e+02,
+        1.5367296143e+03,
+        3.1998581543e+03,
+        2.5530502930e+03,
+        4.7452853394e+02,
+        -2.2440952301e+01,
+    ];
+
+    #[inline(always)]
+    unsafe fn n(value: f32) -> float32x4_t {
+        vdupq_n_f32(value)
+    }
+
+    #[inline(always)]
+    unsafe fn add(a: float32x4_t, b: float32x4_t) -> float32x4_t {
+        vaddq_f32(a, b)
+    }
+
+    #[inline(always)]
+    unsafe fn mul(a: float32x4_t, b: float32x4_t) -> float32x4_t {
+        vmulq_f32(a, b)
+    }
+
+    /// `c[0] + s * (c[1] + s * (... + s * c[last]))`, innermost first.
+    #[inline(always)]
+    unsafe fn horner(s: float32x4_t, c: &[f32]) -> float32x4_t {
+        let mut acc = n(c[c.len() - 1]);
+        for &coefficient in c[..c.len() - 1].iter().rev() {
+            acc = add(n(coefficient), mul(s, acc));
+        }
+        acc
+    }
+
+    /// `1 + s * (c[0] + s * (... + s * c[last]))`.
+    #[inline(always)]
+    unsafe fn one_plus(s: float32x4_t, c: &[f32]) -> float32x4_t {
+        add(n(1.0), mul(s, horner(s, c)))
+    }
+
+    /// `libm::expf` for `|x| < 87.33` with a result above 2^-126.
+    #[inline(always)]
+    unsafe fn expf4(x: float32x4_t) -> float32x4_t {
+        const LN2_HI: f32 = 6.9314575195e-01;
+        const LN2_LO: f32 = 1.4286067653e-06;
+        const INV_LN2: f32 = 1.4426950216e+00;
+        const P1: f32 = 1.6666625440e-1;
+        const P2: f32 = -2.7667332906e-3;
+        let bits = vreinterpretq_u32_f32(x);
+        let sign = vshrq_n_u32::<31>(bits);
+        let hx = vandq_u32(bits, vdupq_n_u32(0x7fff_ffff));
+        // k for |x| > 1.5 ln 2: `(INV_LN2 * x + HALF[sign]) as i32`.
+        let half = vbslq_f32(vceqq_u32(sign, vdupq_n_u32(0)), n(0.5), n(-0.5));
+        let k_far = vcvtq_s32_f32(add(mul(n(INV_LN2), x), half));
+        // k for 0.5 ln 2 < |x| <= 1.5 ln 2: `1 - sign - sign`.
+        let sign_i = vreinterpretq_s32_u32(sign);
+        let k_near = vsubq_s32(vsubq_s32(vdupq_n_s32(1), sign_i), sign_i);
+        let far = vcgtq_u32(hx, vdupq_n_u32(0x3f85_1592));
+        let reduce = vcgtq_u32(hx, vdupq_n_u32(0x3eb1_7218));
+        let k = vbslq_s32(far, k_far, k_near);
+        let k = vbslq_s32(reduce, k, vdupq_n_s32(0));
+        let kf = vcvtq_f32_s32(k);
+        let hi_reduced = vsubq_f32(x, mul(kf, n(LN2_HI)));
+        let lo_reduced = mul(kf, n(LN2_LO));
+        let hi = vbslq_f32(reduce, hi_reduced, x);
+        let lo = vbslq_f32(reduce, lo_reduced, n(0.0));
+        let r = vbslq_f32(reduce, vsubq_f32(hi_reduced, lo_reduced), x);
+        let xx = mul(r, r);
+        let c = vsubq_f32(r, mul(xx, add(n(P1), mul(xx, n(P2)))));
+        let q = vdivq_f32(mul(r, c), vsubq_f32(n(2.0), c));
+        let y = add(n(1.0), add(vsubq_f32(q, lo), hi));
+        // `scalbnf(y, k)` for k in the normal range.
+        let scale = vreinterpretq_f32_s32(vshlq_n_s32::<23>(vaddq_s32(k, vdupq_n_s32(0x7f))));
+        let y = mul(y, scale);
+        // |x| <= 2^-14: `1 + x`.
+        let tiny = vcleq_u32(hx, vdupq_n_u32(0x3900_0000));
+        vbslq_f32(tiny, add(n(1.0), x), y)
+    }
+
+    #[inline(always)]
+    pub(crate) unsafe fn erf4(x: float32x4_t) -> float32x4_t {
+        let bits = vreinterpretq_u32_f32(x);
+        let ix = vandq_u32(bits, vdupq_n_u32(0x7fff_ffff));
+        let sign_bit = vandq_u32(bits, vdupq_n_u32(0x8000_0000));
+        let ax = vreinterpretq_f32_u32(ix);
+
+        // |x| < 2^-28.
+        let tiny = vmulq_n_f32(add(mul(n(8.0), x), mul(n(EFX8), x)), 0.125);
+        // |x| < 0.84375.
+        let z = mul(x, x);
+        let r = horner(z, &PP);
+        let s = one_plus(z, &QQ);
+        let small = add(x, mul(x, vdivq_f32(r, s)));
+        // |x| < 1.25: `1 - erfc1(x)`.
+        let s1 = vsubq_f32(ax, n(1.0));
+        let p = horner(s1, &PA);
+        let q = one_plus(s1, &QA);
+        let erfc1 = vsubq_f32(n(1.0 - ERX), vdivq_f32(p, q));
+        // |x| < 6: `1 - erfc2(x)`.
+        let s2 = vdivq_f32(n(1.0), mul(ax, ax));
+        let near = vcltq_u32(ix, vdupq_n_u32(0x4036_db6d));
+        let r2 = vbslq_f32(near, horner(s2, &RA), horner(s2, &RB));
+        let big_s = vbslq_f32(near, one_plus(s2, &SA), one_plus(s2, &SB));
+        let z2 = vreinterpretq_f32_u32(vandq_u32(ix, vdupq_n_u32(0xffff_e000)));
+        let first = expf4(vsubq_f32(mul(vnegq_f32(z2), z2), n(0.5625)));
+        let second = expf4(add(
+            mul(vsubq_f32(z2, ax), add(z2, ax)),
+            vdivq_f32(r2, big_s),
+        ));
+        let erfc2 = vdivq_f32(mul(first, second), ax);
+        let erfc = vbslq_f32(vcltq_u32(ix, vdupq_n_u32(0x3fa0_0000)), erfc1, erfc2);
+        let large = vsubq_f32(n(1.0), erfc);
+        // |x| >= 6.
+        let large = vbslq_f32(
+            vcltq_u32(ix, vdupq_n_u32(0x40c0_0000)),
+            large,
+            n(1.0 - f32::from_bits(0x0380_0000)),
+        );
+        // `-y` for a negative x.
+        let large = vreinterpretq_f32_u32(veorq_u32(vreinterpretq_u32_f32(large), sign_bit));
+
+        let result = vbslq_f32(vcltq_u32(ix, vdupq_n_u32(0x3f58_0000)), small, large);
+        vbslq_f32(vcltq_u32(ix, vdupq_n_u32(0x3180_0000)), tiny, result)
     }
 }
 
@@ -66,6 +298,124 @@ pub fn exp(x: f32) -> f32 {
     x.exp()
 }
 
+/// `exp` of each value in place.
+#[cfg(not(all(target_arch = "aarch64", target_os = "linux")))]
+pub fn exp_in_place(values: &mut [f32]) {
+    for value in values {
+        *value = exp(*value);
+    }
+}
+
+/// `exp` of each value in place, four values at a time. On Linux, `f32::exp`
+/// is the glibc `expf` of ARM's optimized routines. This is the same
+/// arithmetic in NEON: the same constants and table, and the same fused
+/// multiply-adds. Values outside its fast range go to `f32::exp`.
+#[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+pub fn exp_in_place(values: &mut [f32]) {
+    let mut chunks = values.chunks_exact_mut(4);
+    for chunk in &mut chunks {
+        let input: [f32; 4] = [chunk[0], chunk[1], chunk[2], chunk[3]];
+        if input.iter().all(|value| glibc_exp::in_fast_range(*value)) {
+            // SAFETY: NEON is part of the aarch64 base architecture.
+            chunk.copy_from_slice(&unsafe { glibc_exp::four(input) });
+        } else {
+            for value in chunk {
+                *value = value.exp();
+            }
+        }
+    }
+    for value in chunks.into_remainder() {
+        *value = value.exp();
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+pub(crate) mod glibc_exp {
+    use core::arch::aarch64::*;
+
+    /// `N / ln 2` with `N = 32`.
+    const INV_LN2_N: f64 = f64::from_bits(0x4047_1547_652b_82fe);
+    /// The polynomial, highest degree first.
+    const C0: f64 = f64::from_bits(0x3ebc_6af8_4b91_2394);
+    const C1: f64 = f64::from_bits(0x3f2e_bfce_50fa_c4f3);
+    const C2: f64 = f64::from_bits(0x3f96_2e42_ff0c_52d6);
+    /// `2^(i / 32)` with `i << 47` taken from the bits.
+    const TABLE: [u64; 32] = [
+        0x3ff0000000000000,
+        0x3fefd9b0d3158574,
+        0x3fefb5586cf9890f,
+        0x3fef9301d0125b51,
+        0x3fef72b83c7d517b,
+        0x3fef54873168b9aa,
+        0x3fef387a6e756238,
+        0x3fef1e9df51fdee1,
+        0x3fef06fe0a31b715,
+        0x3feef1a7373aa9cb,
+        0x3feedea64c123422,
+        0x3feece086061892d,
+        0x3feebfdad5362a27,
+        0x3feeb42b569d4f82,
+        0x3feeab07dd485429,
+        0x3feea47eb03a5585,
+        0x3feea09e667f3bcd,
+        0x3fee9f75e8ec5f74,
+        0x3feea11473eb0187,
+        0x3feea589994cce13,
+        0x3feeace5422aa0db,
+        0x3feeb737b0cdc5e5,
+        0x3feec49182a3f090,
+        0x3feed503b23e255d,
+        0x3feee89f995ad3ad,
+        0x3feeff76f2fb5e47,
+        0x3fef199bdd85529c,
+        0x3fef3720dcef9069,
+        0x3fef5818dcfba487,
+        0x3fef7c97337b9b5f,
+        0x3fefa4afa2a490da,
+        0x3fefd0765b6e4540,
+    ];
+
+    /// glibc takes the fast path when the top 12 bits of `|x|` are at most
+    /// those of 88.0.
+    #[inline(always)]
+    pub(crate) fn in_fast_range(x: f32) -> bool {
+        (x.to_bits() >> 20) & 0x7ff <= 0x42a
+    }
+
+    #[inline(always)]
+    unsafe fn two(x: float64x2_t) -> float64x2_t {
+        let z = vmulq_f64(x, vdupq_n_f64(INV_LN2_N));
+        let kd = vrndaq_f64(z);
+        let ki = vcvtaq_s64_f64(z);
+        let r = vsubq_f64(z, kd);
+        let index = vandq_s64(ki, vdupq_n_s64(31));
+        let table = vcombine_u64(
+            vcreate_u64(TABLE[vgetq_lane_s64::<0>(index) as usize]),
+            vcreate_u64(TABLE[vgetq_lane_s64::<1>(index) as usize]),
+        );
+        let s = vreinterpretq_f64_u64(vaddq_u64(
+            table,
+            vshlq_n_u64::<47>(vreinterpretq_u64_s64(ki)),
+        ));
+        let p = vfmaq_f64(vdupq_n_f64(C1), vdupq_n_f64(C0), r);
+        let y = vfmaq_f64(vdupq_n_f64(1.0), vdupq_n_f64(C2), r);
+        let y = vfmaq_f64(y, p, vmulq_f64(r, r));
+        vmulq_f64(y, s)
+    }
+
+    /// `expf` of four values in the fast range.
+    #[inline(always)]
+    pub(crate) unsafe fn four(x: [f32; 4]) -> [f32; 4] {
+        let x = vld1q_f32(x.as_ptr());
+        let low = two(vcvt_f64_f32(vget_low_f32(x)));
+        let high = two(vcvt_high_f64_f32(x));
+        let y = vcvt_high_f32_f64(vcvt_f32_f64(low), high);
+        let mut out = [0.0f32; 4];
+        vst1q_f32(out.as_mut_ptr(), y);
+        out
+    }
+}
+
 /// `F.glu(x, dim = 1)`: `a * sigmoid(b)` where the channel axis is split in
 /// half. Works for any rank; the channel axis is the second.
 pub fn glu(x: &Tensor) -> Tensor {
@@ -81,9 +431,14 @@ pub fn glu(x: &Tensor) -> Tensor {
             let a = (index * channels + channel) * spatial;
             let b = (index * channels + channel + half) * spatial;
             let destination = (index * half + channel) * spatial;
-            for offset in 0..spatial {
-                output.data[destination + offset] =
-                    x.data[a + offset] * sigmoid(x.data[b + offset]);
+            // `sigmoid` with its exponentials taken together.
+            let gate = &mut output.data[destination..destination + spatial];
+            for (value, &b) in gate.iter_mut().zip(&x.data[b..b + spatial]) {
+                *value = -b;
+            }
+            exp_in_place(gate);
+            for (value, &a) in gate.iter_mut().zip(&x.data[a..a + spatial]) {
+                *value = a * (1.0 / (1.0 + *value));
             }
         }
     }
@@ -627,6 +982,148 @@ pub fn conv_transpose2d(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exp_in_place_equals_exp_at_the_edges_of_its_range() {
+        let mut values: Vec<f32> = vec![
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            87.9,
+            -87.9,
+            88.0,
+            -88.0,
+            88.8,
+            -103.5,
+            -104.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            f32::MIN_POSITIVE,
+            -1e-30,
+        ];
+        values.extend((0..997).map(|i| i as f32 * 0.21 - 105.0));
+        let expected: Vec<u32> = values.iter().map(|value| exp(*value).to_bits()).collect();
+        exp_in_place(&mut values);
+        let got: Vec<u32> = values.iter().map(|value| value.to_bits()).collect();
+        assert_eq!(got, expected);
+    }
+
+    /// Every f32 in the fast range against glibc `expf`. Run on the Lambda
+    /// processor: `cargo test --release -- --ignored exp_fast_range`.
+    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+    #[test]
+    #[ignore]
+    fn exp_fast_range_equals_glibc_for_every_f32() {
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let span = (1u64 << 32) / threads as u64;
+        let failures: usize = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..threads as u64)
+                .map(|t| {
+                    scope.spawn(move || {
+                        let mut failures = 0;
+                        let mut bits = t * span;
+                        let end = if t + 1 == threads as u64 {
+                            1 << 32
+                        } else {
+                            (t + 1) * span
+                        };
+                        while bits < end {
+                            let x: [f32; 4] =
+                                std::array::from_fn(|i| f32::from_bits((bits + i as u64) as u32));
+                            bits += 4;
+                            if !x.iter().all(|v| glibc_exp::in_fast_range(*v)) {
+                                continue;
+                            }
+                            // SAFETY: NEON is part of the aarch64 base architecture.
+                            let got = unsafe { glibc_exp::four(x) };
+                            for i in 0..4 {
+                                if got[i].to_bits() != x[i].exp().to_bits() {
+                                    failures += 1;
+                                }
+                            }
+                        }
+                        failures
+                    })
+                })
+                .collect();
+            workers.into_iter().map(|w| w.join().unwrap()).sum()
+        });
+        assert_eq!(failures, 0);
+    }
+
+    #[test]
+    fn gelu_in_place_equals_gelu_one() {
+        let mut values: Vec<f32> = (0..4001).map(|i| (i as f32 - 2000.0) * 0.0047).collect();
+        values.extend([
+            0.0,
+            -0.0,
+            1e-30,
+            -1e-30,
+            8.0,
+            -8.0,
+            1e30,
+            f32::NAN,
+            f32::INFINITY,
+        ]);
+        let expected: Vec<u32> = values.iter().map(|v| gelu_one(*v).to_bits()).collect();
+        gelu_in_place(&mut values);
+        let got: Vec<u32> = values.iter().map(|v| v.to_bits()).collect();
+        assert_eq!(got, expected);
+    }
+
+    /// Every finite f32 against `libm::erff`:
+    /// `cargo test --release -- --ignored erf4`.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore]
+    fn erf4_equals_libm_erff_for_every_finite_f32() {
+        use core::arch::aarch64::*;
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let span = (1u64 << 32) / threads as u64;
+        let failures: Vec<u32> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..threads as u64)
+                .map(|t| {
+                    scope.spawn(move || {
+                        let mut failures = Vec::new();
+                        let end = if t + 1 == threads as u64 {
+                            1 << 32
+                        } else {
+                            (t + 1) * span
+                        };
+                        let mut bits = t * span;
+                        while bits < end {
+                            let x: [f32; 4] =
+                                std::array::from_fn(|i| f32::from_bits((bits + i as u64) as u32));
+                            bits += 4;
+                            if x.iter().any(|v| !v.is_finite()) {
+                                continue;
+                            }
+                            let mut got = [0.0f32; 4];
+                            // SAFETY: NEON is part of the aarch64 base architecture.
+                            unsafe {
+                                vst1q_f32(got.as_mut_ptr(), neon_erf::erf4(vld1q_f32(x.as_ptr())))
+                            };
+                            for i in 0..4 {
+                                if got[i].to_bits() != libm::erff(x[i]).to_bits()
+                                    && failures.len() < 8
+                                {
+                                    failures.push(x[i].to_bits());
+                                }
+                            }
+                        }
+                        failures
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|w| w.join().unwrap())
+                .collect()
+        });
+        assert!(failures.is_empty(), "{failures:08x?}");
+    }
 
     #[test]
     fn group_norm_matches_a_hand_computation() {

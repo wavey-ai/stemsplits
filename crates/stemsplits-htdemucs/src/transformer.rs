@@ -352,9 +352,12 @@ fn attention_head(
         crate::matmul::matmul(query, keys_transposed, scores, rows, head_dim, keys);
         for row in scores.chunks_mut(keys) {
             let maximum = row.iter().copied().fold(f32::MIN, f32::max);
-            let mut sum = 0.0f32;
             for value in row.iter_mut() {
-                *value = crate::ops::exp(*value - maximum);
+                *value -= maximum;
+            }
+            crate::ops::exp_in_place(row);
+            let mut sum = 0.0f32;
+            for value in row.iter() {
                 sum += *value;
             }
             for value in row.iter_mut() {

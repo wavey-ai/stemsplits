@@ -36,6 +36,20 @@ each output against the old kernel's arithmetic. The old kernel, built by
 gcc, passes the same test. The measurements are in
 [`BENCHMARKS.md`](BENCHMARKS.md), "Graviton2".
 
+### Decision: `exp` and `erf` four values at a time, with the same bits
+
+After the GEMM, the softmax `exp`, the GLU sigmoid and the GELU `erff` were
+about 15% of a segment. Each is a scalar call for each value. On Linux,
+`f32::exp` calls the glibc `expf`. GELU calls `libm::erff`.
+
+`exp_in_place` copies the glibc `expf` arithmetic into NEON for Linux on
+aarch64. It uses the same table, constants and fused multiply-adds. Values
+outside the fast range of glibc go to `f32::exp`. `neon_erf::erf4` computes
+each branch of `libm::erff` and `libm::expf` in each lane, and keeps the
+branch of the lane. Rust does not contract f32 operations, so each lane has
+the operations of the scalar code. Exhaustive tests check both functions.
+A segment takes 29.9 s on one Graviton2 core after these changes.
+
 ## 2026-09-23 — Port HTDemucs to pure Rust, no ONNX at runtime
 
 ### Context

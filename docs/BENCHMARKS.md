@@ -112,6 +112,25 @@ gives the same instructions.
 - The segment function of 1,769 MB took 73 to 76 s for each segment before
   the change, with the Opus decode and encode.
 
+Changes after the GEMM, one thread. Each change gives the output bits of
+the old kernel at one thread and at two threads.
+
+| Change | Segment |
+| --- | ---: |
+| Cache-blocked GEMM | 32.0 s |
+| Softmax `exp` in NEON, four values at a time | 31.2 s |
+| GLU sigmoid with the same `exp` | 30.6 s |
+| GELU `erff` in NEON, four values at a time | 29.9 s |
+
+- On Linux, `f32::exp` is the glibc `expf`. `exp_in_place` uses the
+  arithmetic of that `expf` in NEON. Its fast range covers 2,130,706,432
+  inputs, and the test `exp_fast_range_equals_glibc_for_every_f32` checks
+  each one against glibc 2.39. glibc 2.34 of Amazon Linux 2023 has the same
+  operations, table and constants.
+- `neon_erf::erf4` computes each branch of `libm::erff`, and of the
+  `libm::expf` that it calls, with the same f32 operations. The test
+  `erf4_equals_libm_erff_for_every_finite_f32` checks each finite f32.
+
 Block sizes, one thread:
 
 | `KC` | `MC` | `NC` | Segment |
