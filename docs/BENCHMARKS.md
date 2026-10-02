@@ -90,6 +90,43 @@ The two browsers gave the same 16-bit stems, byte for byte. The sum of the
 browser stems was −31.4 dB from the mix. The sum of the cloud stems for the
 same mix, with Opus in both directions, was −17.6 dB from the mix.
 
+## Graviton2
+
+Recorded 2026-10-02. The host is an m6g.large (Graviton2, Neoverse N1, two
+cores), the processor of Lambda arm64. The input is the seeded segment of
+`bench`. The C kernel is compiled by gcc 13; gcc 12 of the Lambda image
+gives the same instructions.
+
+| Kernel | One thread | Two threads on one core | Two threads on two cores |
+| --- | ---: | ---: | ---: |
+| Four rows by 16 columns over all of `b` | 64.7 s | 66.3 s | 38.8 s |
+| Cache-blocked and packed | 32.0 s | 34.5 s | 21.7 s |
+
+- The two threads on one core model a Lambda function of 1,769 MB.
+- The GEMM was 81% of the segment before the change and 61% after. It does
+  about 300 GFLOP for each segment.
+- The new kernel gives the output bits of the old kernel at one thread and
+  at two threads. `STEMSPLITS_DUMP` writes the bits. The output of one
+  thread differs from the output of two threads, because `matmul` splits the
+  rows by thread.
+- The segment function of 1,769 MB took 73 to 76 s for each segment before
+  the change, with the Opus decode and encode.
+
+Block sizes, one thread:
+
+| `KC` | `MC` | `NC` | Segment |
+| ---: | ---: | ---: | ---: |
+| 256 | 64 | 512 | 32.0 s |
+| 128 | 64 | 512 | 33.0 s |
+| 512 | 64 | 512 | 31.8 s |
+| 256 | 128 | 512 | 32.1 s |
+| 256 | 32 | 512 | 32.1 s |
+| 256 | 64 | 1024 | 32.0 s |
+| 256 | 64 | 256 | 32.2 s |
+| 384 | 96 | 768 | 31.9 s |
+
+All block sizes gave the same output bits.
+
 ## Reproduce
 
 The bench needs the weight bundle; see `tools/reference/README.md`.

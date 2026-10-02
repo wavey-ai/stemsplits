@@ -61,8 +61,19 @@ fn main() {
 
     // First pass, timed on its own so a slow run still reports.
     let start = Instant::now();
-    let _ = model.forward(&magnitude, &waveform);
+    let (freq, time) = model.forward(&magnitude, &waveform);
     let first = start.elapsed().as_secs_f64();
+    // `STEMSPLITS_DUMP` names a file for the raw f32 outputs, so two builds
+    // can be compared bit for bit.
+    if let Some(path) = std::env::var_os("STEMSPLITS_DUMP") {
+        let bytes: Vec<u8> = freq
+            .data
+            .iter()
+            .chain(&time.data)
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        std::fs::write(path, bytes).expect("dump");
+    }
     println!(
         "first forward: {first:.3} s/segment, audio {audio:.3} s, RTF {:.3}",
         first / audio

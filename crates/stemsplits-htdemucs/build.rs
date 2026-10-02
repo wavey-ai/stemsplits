@@ -12,7 +12,11 @@ fn main() {
             build.flag_if_supported("-mavx2");
             build.flag_if_supported("-mfma");
         }
-        // aarch64 has NEON by default; nothing to add.
+        // aarch64 has NEON by default. The kernel chooses each fused and
+        // unfused multiply-add itself.
+        "aarch64" => {
+            build.flag("-ffp-contract=off");
+        }
         _ => {}
     }
     build.compile("stemsplits_gemm");

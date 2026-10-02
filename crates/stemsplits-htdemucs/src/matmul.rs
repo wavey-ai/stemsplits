@@ -214,6 +214,43 @@ mod tests {
         assert_eq!(out, [58.0, 64.0, 139.0, 154.0]);
     }
 
+    /// On aarch64 the kernel sums the blocks of four rows by four columns with
+    /// a separate multiply and add and the rest with a fused multiply-add, in
+    /// `k` order. The shape crosses each cache block of the kernel.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn matmul_keeps_the_bits_of_the_aarch64_sums() {
+        let (m, k, n) = (70, 600, 531);
+        let a: Vec<f32> = (0..m * k)
+            .map(|i| ((i * 2654435761) % 1999) as f32 / 999.0 - 1.0)
+            .collect();
+        let b: Vec<f32> = (0..k * n)
+            .map(|i| ((i * 40503) % 997) as f32 / 497.0 - 1.0)
+            .collect();
+        let mut got = vec![0.0f32; m * n];
+        // SAFETY: the lengths match the shape.
+        unsafe { stemsplits_gemm(a.as_ptr(), b.as_ptr(), got.as_mut_ptr(), m, k, n) };
+        let (m4, n4) = (m - m % 4, n - n % 4);
+        for row in 0..m {
+            for column in 0..n {
+                let mut expected = 0.0f32;
+                for inner in 0..k {
+                    let (x, y) = (a[row * k + inner], b[inner * n + column]);
+                    expected = if row < m4 && column < n4 {
+                        expected + x * y
+                    } else {
+                        x.mul_add(y, expected)
+                    };
+                }
+                assert_eq!(
+                    got[row * n + column].to_bits(),
+                    expected.to_bits(),
+                    "at {row},{column}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn matmul_agrees_with_a_direct_loop_past_the_simd_width() {
         let (m, k, n) = (37, 130, 19);

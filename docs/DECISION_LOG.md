@@ -4,6 +4,38 @@ Why this repository exists, what it is made of, and the order it is being
 built in. Newest decisions at the top of each section. Dates are when the
 decision was made.
 
+## 2026-10-02 — Cache-blocked GEMM on aarch64
+
+### Context
+
+On Graviton2, one segment took 64.7 s on one thread. The GEMM was 81% of
+that time. The kernel read all of `b` for each group of four rows. A Linear
+`b` of 1 to 4 MB is larger than the 1 MB L2 cache of Neoverse N1.
+
+### Decision: block and pack the operands, and keep each sum
+
+The aarch64 kernel packs a panel of `b` of 256 rows by 16 columns for L1
+and a block of `a` of 64 rows for L2. It packs 512 columns of `b` at a time.
+Between blocks of `k`, each partial sum goes to `out` and comes back
+unchanged. Each output adds its products in `k` order, as before.
+
+gcc builds `vmlaq_n_f32` as a separate multiply and add, and builds the
+scalar tail as a fused multiply-add. The new kernel writes these operations
+explicitly: `vmulq_laneq_f32` and `vaddq_f32` in the blocks of four rows by
+four columns, and `fmaf` for the other outputs. `build.rs` sets
+`-ffp-contract=off` on aarch64, so the compiler keeps this split. clang
+fused `vmlaq_n_f32` on macOS, so a macOS build now gives the bits of the
+Linux build.
+
+### Result
+
+One segment takes 32.0 s on one thread, and 34.5 s for two threads on one
+core. The output bits are the same as before for one thread and for two
+threads. `matmul_keeps_the_bits_of_the_aarch64_sums` checks the bits of
+each output against the old kernel's arithmetic. The old kernel, built by
+gcc, passes the same test. The measurements are in
+[`BENCHMARKS.md`](BENCHMARKS.md), "Graviton2".
+
 ## 2026-09-23 — Port HTDemucs to pure Rust, no ONNX at runtime
 
 ### Context

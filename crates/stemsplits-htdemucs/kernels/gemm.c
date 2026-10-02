@@ -6,22 +6,156 @@
 // changing the result, and the compiler will not do it — so the SIMD is
 // explicit, as in `encodec-rs`.
 //
-// The micro-kernel holds four rows' accumulators in registers across the
-// whole `k` loop. That is what makes it fast: a version that reads and writes
-// `out` once per `k` is memory-bound on the output, and a version that keeps
-// one accumulator per output re-reads the weight for every row. Here each
-// weight vector is loaded once and used for four rows, and the output is
-// written once. The per-output accumulation order is `k` increasing, as in
-// the scalar loop, so a SIMD lane never reorders a sum; only FMA contraction
-// differs, which is inside the parity tolerance the tests use.
+// Each output is summed in `k` increasing order, as in the scalar loop, so a
+// SIMD lane never reorders a sum. On aarch64 the vector outputs use a separate
+// multiply and add, and the outputs outside the blocks of four rows and four
+// columns use a fused multiply-add. `build.rs` turns off FMA contraction on
+// aarch64 so the compiler keeps that split.
 
 #include <stddef.h>
 
 #if defined(__AVX2__)
 #include <immintrin.h>
-#elif defined(__aarch64__) || defined(__ARM_NEON)
+#elif defined(__aarch64__)
 #include <arm_neon.h>
+#include <math.h>
+#include <stdlib.h>
 #endif
+
+#if defined(__aarch64__)
+
+// The blocks that keep the operands in cache: a panel of `b` of `KC` rows by
+// 16 columns stays in L1, a block of `a` of `MC` rows by `KC` stays in L2, and
+// the packed `b` of `KC` rows by `NC` columns stays in L2. Between `k` blocks
+// the partial sums go to `out` and come back unchanged, so the blocking keeps
+// every sum bit for bit.
+#define KC 256
+#define MC 64
+#define NC 512
+#define NR 16
+
+static float dot(const float *a_row, const float *b, size_t k, size_t n, size_t column) {
+    float sum = 0.0f;
+    for (size_t inner = 0; inner < k; inner++) {
+        sum = fmaf(a_row[inner], b[inner * n + column], sum);
+    }
+    return sum;
+}
+
+// Four rows by up to 16 columns over `kc` steps. `ap` holds the four rows
+// interleaved, `bp` 16 columns per step. `width` is the number of valid
+// columns, a multiple of four. With `first`, the sums start at zero;
+// otherwise they continue from `c`.
+static void kernel_4x16(size_t kc, const float *ap, const float *bp,
+                        float *c, size_t ldc, size_t width, int first) {
+    float32x4_t c0[4], c1[4], c2[4], c3[4];
+    const size_t vectors = width / 4;
+    for (size_t v = 0; v < 4; v++) {
+        if (!first && v < vectors) {
+            c0[v] = vld1q_f32(c + 0 * ldc + 4 * v);
+            c1[v] = vld1q_f32(c + 1 * ldc + 4 * v);
+            c2[v] = vld1q_f32(c + 2 * ldc + 4 * v);
+            c3[v] = vld1q_f32(c + 3 * ldc + 4 * v);
+        } else {
+            c0[v] = c1[v] = c2[v] = c3[v] = vdupq_n_f32(0.0f);
+        }
+    }
+    for (size_t p = 0; p < kc; p++) {
+        const float32x4_t a = vld1q_f32(ap + 4 * p);
+        const float32x4_t x0 = vld1q_f32(bp + NR * p);
+        const float32x4_t x1 = vld1q_f32(bp + NR * p + 4);
+        const float32x4_t x2 = vld1q_f32(bp + NR * p + 8);
+        const float32x4_t x3 = vld1q_f32(bp + NR * p + 12);
+        c0[0] = vaddq_f32(c0[0], vmulq_laneq_f32(x0, a, 0));
+        c0[1] = vaddq_f32(c0[1], vmulq_laneq_f32(x1, a, 0));
+        c0[2] = vaddq_f32(c0[2], vmulq_laneq_f32(x2, a, 0));
+        c0[3] = vaddq_f32(c0[3], vmulq_laneq_f32(x3, a, 0));
+        c1[0] = vaddq_f32(c1[0], vmulq_laneq_f32(x0, a, 1));
+        c1[1] = vaddq_f32(c1[1], vmulq_laneq_f32(x1, a, 1));
+        c1[2] = vaddq_f32(c1[2], vmulq_laneq_f32(x2, a, 1));
+        c1[3] = vaddq_f32(c1[3], vmulq_laneq_f32(x3, a, 1));
+        c2[0] = vaddq_f32(c2[0], vmulq_laneq_f32(x0, a, 2));
+        c2[1] = vaddq_f32(c2[1], vmulq_laneq_f32(x1, a, 2));
+        c2[2] = vaddq_f32(c2[2], vmulq_laneq_f32(x2, a, 2));
+        c2[3] = vaddq_f32(c2[3], vmulq_laneq_f32(x3, a, 2));
+        c3[0] = vaddq_f32(c3[0], vmulq_laneq_f32(x0, a, 3));
+        c3[1] = vaddq_f32(c3[1], vmulq_laneq_f32(x1, a, 3));
+        c3[2] = vaddq_f32(c3[2], vmulq_laneq_f32(x2, a, 3));
+        c3[3] = vaddq_f32(c3[3], vmulq_laneq_f32(x3, a, 3));
+    }
+    for (size_t v = 0; v < vectors; v++) {
+        vst1q_f32(c + 0 * ldc + 4 * v, c0[v]);
+        vst1q_f32(c + 1 * ldc + 4 * v, c1[v]);
+        vst1q_f32(c + 2 * ldc + 4 * v, c2[v]);
+        vst1q_f32(c + 3 * ldc + 4 * v, c3[v]);
+    }
+}
+
+void stemsplits_gemm(const float *a, const float *b, float *out,
+                     size_t m, size_t k, size_t n) {
+    // The blocked part covers whole blocks of four rows and four columns;
+    // the scalar loop below covers the rest, as before.
+    const size_t m4 = m - m % 4;
+    const size_t n4 = n - n % 4;
+    if (m4 > 0 && n4 > 0 && k > 0) {
+        const size_t kc_max = k < KC ? k : KC;
+        const size_t nc_max = n4 < NC ? n4 : NC;
+        const size_t mc_max = m4 < MC ? m4 : MC;
+        float *bpack = malloc(sizeof(float) * kc_max * ((nc_max + NR - 1) / NR) * NR);
+        float *apack = malloc(sizeof(float) * kc_max * mc_max);
+        for (size_t jc = 0; jc < n4; jc += NC) {
+            const size_t nc = n4 - jc < NC ? n4 - jc : NC;
+            const size_t panels = (nc + NR - 1) / NR;
+            for (size_t pc = 0; pc < k; pc += KC) {
+                const size_t kc = k - pc < KC ? k - pc : KC;
+                for (size_t q = 0; q < panels; q++) {
+                    const size_t width = nc - q * NR < NR ? nc - q * NR : NR;
+                    float *panel = bpack + q * kc * NR;
+                    for (size_t p = 0; p < kc; p++) {
+                        const float *row = b + (pc + p) * n + jc + q * NR;
+                        size_t column = 0;
+                        for (; column < width; column++) panel[p * NR + column] = row[column];
+                        for (; column < NR; column++) panel[p * NR + column] = 0.0f;
+                    }
+                }
+                for (size_t ic = 0; ic < m4; ic += MC) {
+                    const size_t mc = m4 - ic < MC ? m4 - ic : MC;
+                    for (size_t r = 0; r < mc; r += 4) {
+                        float *block = apack + r * kc;
+                        for (size_t p = 0; p < kc; p++) {
+                            for (size_t lane = 0; lane < 4; lane++) {
+                                block[4 * p + lane] = a[(ic + r + lane) * k + pc + p];
+                            }
+                        }
+                    }
+                    for (size_t q = 0; q < panels; q++) {
+                        const size_t width = nc - q * NR < NR ? nc - q * NR : NR;
+                        for (size_t r = 0; r < mc; r += 4) {
+                            kernel_4x16(kc, apack + r * kc, bpack + q * kc * NR,
+                                        out + (ic + r) * n + jc + q * NR, n, width, pc == 0);
+                        }
+                    }
+                }
+            }
+        }
+        free(apack);
+        free(bpack);
+    }
+    for (size_t i = 0; i < m4; i++) {
+        const float *a_row = a + i * k;
+        for (size_t j = n4; j < n; j++) {
+            out[i * n + j] = dot(a_row, b, k, n, j);
+        }
+    }
+    for (size_t i = m4; i < m; i++) {
+        const float *a_row = a + i * k;
+        for (size_t j = 0; j < n; j++) {
+            out[i * n + j] = dot(a_row, b, k, n, j);
+        }
+    }
+}
+
+#else
 
 static float dot(const float *a_row, const float *b, size_t k, size_t n, size_t column) {
     float sum = 0.0f;
@@ -92,102 +226,6 @@ void stemsplits_gemm(const float *a, const float *b, float *out,
             _mm256_storeu_ps(o2 + j, c2);
             _mm256_storeu_ps(o3 + j, c3);
         }
-#elif defined(__aarch64__) || defined(__ARM_NEON)
-#if defined(__aarch64__)
-        for (; j + 16 <= n; j += 16) {
-            float32x4_t c00 = vdupq_n_f32(0.0f), c01 = vdupq_n_f32(0.0f);
-            float32x4_t c02 = vdupq_n_f32(0.0f), c03 = vdupq_n_f32(0.0f);
-            float32x4_t c10 = vdupq_n_f32(0.0f), c11 = vdupq_n_f32(0.0f);
-            float32x4_t c12 = vdupq_n_f32(0.0f), c13 = vdupq_n_f32(0.0f);
-            float32x4_t c20 = vdupq_n_f32(0.0f), c21 = vdupq_n_f32(0.0f);
-            float32x4_t c22 = vdupq_n_f32(0.0f), c23 = vdupq_n_f32(0.0f);
-            float32x4_t c30 = vdupq_n_f32(0.0f), c31 = vdupq_n_f32(0.0f);
-            float32x4_t c32 = vdupq_n_f32(0.0f), c33 = vdupq_n_f32(0.0f);
-            for (size_t inner = 0; inner < k; inner++) {
-                const float32x4_t x0 = vld1q_f32(b + inner * n + j);
-                const float32x4_t x1 = vld1q_f32(b + inner * n + j + 4);
-                const float32x4_t x2 = vld1q_f32(b + inner * n + j + 8);
-                const float32x4_t x3 = vld1q_f32(b + inner * n + j + 12);
-                const float v0 = a0[inner], v1 = a1[inner];
-                const float v2 = a2[inner], v3 = a3[inner];
-                c00 = vmlaq_n_f32(c00, x0, v0);
-                c01 = vmlaq_n_f32(c01, x1, v0);
-                c02 = vmlaq_n_f32(c02, x2, v0);
-                c03 = vmlaq_n_f32(c03, x3, v0);
-                c10 = vmlaq_n_f32(c10, x0, v1);
-                c11 = vmlaq_n_f32(c11, x1, v1);
-                c12 = vmlaq_n_f32(c12, x2, v1);
-                c13 = vmlaq_n_f32(c13, x3, v1);
-                c20 = vmlaq_n_f32(c20, x0, v2);
-                c21 = vmlaq_n_f32(c21, x1, v2);
-                c22 = vmlaq_n_f32(c22, x2, v2);
-                c23 = vmlaq_n_f32(c23, x3, v2);
-                c30 = vmlaq_n_f32(c30, x0, v3);
-                c31 = vmlaq_n_f32(c31, x1, v3);
-                c32 = vmlaq_n_f32(c32, x2, v3);
-                c33 = vmlaq_n_f32(c33, x3, v3);
-            }
-            vst1q_f32(o0 + j, c00);
-            vst1q_f32(o0 + j + 4, c01);
-            vst1q_f32(o0 + j + 8, c02);
-            vst1q_f32(o0 + j + 12, c03);
-            vst1q_f32(o1 + j, c10);
-            vst1q_f32(o1 + j + 4, c11);
-            vst1q_f32(o1 + j + 8, c12);
-            vst1q_f32(o1 + j + 12, c13);
-            vst1q_f32(o2 + j, c20);
-            vst1q_f32(o2 + j + 4, c21);
-            vst1q_f32(o2 + j + 8, c22);
-            vst1q_f32(o2 + j + 12, c23);
-            vst1q_f32(o3 + j, c30);
-            vst1q_f32(o3 + j + 4, c31);
-            vst1q_f32(o3 + j + 8, c32);
-            vst1q_f32(o3 + j + 12, c33);
-        }
-#endif
-        for (; j + 8 <= n; j += 8) {
-            float32x4_t c0l = vdupq_n_f32(0.0f), c0h = vdupq_n_f32(0.0f);
-            float32x4_t c1l = vdupq_n_f32(0.0f), c1h = vdupq_n_f32(0.0f);
-            float32x4_t c2l = vdupq_n_f32(0.0f), c2h = vdupq_n_f32(0.0f);
-            float32x4_t c3l = vdupq_n_f32(0.0f), c3h = vdupq_n_f32(0.0f);
-            for (size_t inner = 0; inner < k; inner++) {
-                const float32x4_t xl = vld1q_f32(b + inner * n + j);
-                const float32x4_t xh = vld1q_f32(b + inner * n + j + 4);
-                const float v0 = a0[inner], v1 = a1[inner];
-                const float v2 = a2[inner], v3 = a3[inner];
-                c0l = vmlaq_n_f32(c0l, xl, v0);
-                c0h = vmlaq_n_f32(c0h, xh, v0);
-                c1l = vmlaq_n_f32(c1l, xl, v1);
-                c1h = vmlaq_n_f32(c1h, xh, v1);
-                c2l = vmlaq_n_f32(c2l, xl, v2);
-                c2h = vmlaq_n_f32(c2h, xh, v2);
-                c3l = vmlaq_n_f32(c3l, xl, v3);
-                c3h = vmlaq_n_f32(c3h, xh, v3);
-            }
-            vst1q_f32(o0 + j, c0l);
-            vst1q_f32(o0 + j + 4, c0h);
-            vst1q_f32(o1 + j, c1l);
-            vst1q_f32(o1 + j + 4, c1h);
-            vst1q_f32(o2 + j, c2l);
-            vst1q_f32(o2 + j + 4, c2h);
-            vst1q_f32(o3 + j, c3l);
-            vst1q_f32(o3 + j + 4, c3h);
-        }
-        for (; j + 4 <= n; j += 4) {
-            float32x4_t c0 = vdupq_n_f32(0.0f), c1 = vdupq_n_f32(0.0f);
-            float32x4_t c2 = vdupq_n_f32(0.0f), c3 = vdupq_n_f32(0.0f);
-            for (size_t inner = 0; inner < k; inner++) {
-                const float32x4_t x = vld1q_f32(b + inner * n + j);
-                c0 = vmlaq_n_f32(c0, x, a0[inner]);
-                c1 = vmlaq_n_f32(c1, x, a1[inner]);
-                c2 = vmlaq_n_f32(c2, x, a2[inner]);
-                c3 = vmlaq_n_f32(c3, x, a3[inner]);
-            }
-            vst1q_f32(o0 + j, c0);
-            vst1q_f32(o1 + j, c1);
-            vst1q_f32(o2 + j, c2);
-            vst1q_f32(o3 + j, c3);
-        }
 #endif
         for (; j < n; j++) {
             o0[j] = dot(a0, b, k, n, j);
@@ -204,3 +242,5 @@ void stemsplits_gemm(const float *a, const float *b, float *out,
         }
     }
 }
+
+#endif
