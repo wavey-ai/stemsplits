@@ -107,3 +107,29 @@ These durations include client transfer time and do not form a regional performa
 
 Worker version `554e6bb3-930b-48d3-836f-589ffe388fe0` enabled regional routing.
 Site version `14723a5b-7ff4-41fc-b64e-ef62e9ddd7fd` enabled regional retry metadata.
+
+## Graviton2 kernels
+
+Deployed on 3 October 2026 to the five regions.
+
+- Image digest: `sha256:6cd30ccbe61ba74aff5aa42ac24811df519267f2f117cdd5600914052fb51ba0`.
+- Lambda: arm64, 1,769 MB, 120-second timeout.
+- Source: commit `ce12d0a`.
+
+`deploy/aws/smoke.mjs` sends one synthetic segment. Before the deployment,
+eu-north-1 returned SHA-256
+`f10b6515e55956a9802a44e80255dd5721678111804c1a9fd96f6a873904b987`. After
+the deployment, all five regions returned the same SHA-256.
+
+Three warm requests went to each of two regions, in turn. eu-north-1 had
+the new image and eu-west-1 had the previous image. The client times include
+the transfer:
+
+| Region | Image | Request 1 | Request 2 | Request 3 |
+| --- | --- | ---: | ---: | ---: |
+| eu-north-1 | New | 22.7 s | 22.8 s | 23.0 s |
+| eu-west-1 | Previous | 64.9 s | 65.0 s | 66.2 s |
+
+The browser WASM build gives the same output bits before and after these
+changes. Its time for one segment in Node on an Apple M1 is 13 to 14 s
+before and after.
