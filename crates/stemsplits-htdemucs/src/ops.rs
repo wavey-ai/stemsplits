@@ -224,6 +224,9 @@ pub(crate) mod neon_erf {
         let r = horner(z, &PP);
         let s = one_plus(z, &QQ);
         let small = add(x, mul(x, vdivq_f32(r, s)));
+        if vmaxvq_u32(ix) < 0x3f58_0000 {
+            return vbslq_f32(vcltq_u32(ix, vdupq_n_u32(0x3180_0000)), tiny, small);
+        }
         // |x| < 1.25: `1 - erfc1(x)`.
         let s1 = vsubq_f32(ax, n(1.0));
         let p = horner(s1, &PA);

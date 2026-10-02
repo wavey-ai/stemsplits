@@ -48,7 +48,7 @@ outside the fast range of glibc go to `f32::exp`. `neon_erf::erf4` computes
 each branch of `libm::erff` and `libm::expf` in each lane, and keeps the
 branch of the lane. Rust does not contract f32 operations, so each lane has
 the operations of the scalar code. Exhaustive tests check both functions.
-A segment takes 29.9 s on one Graviton2 core after these changes.
+A segment takes 29.9 s on one Graviton2 core after these changes. The softmax then sums four rows side by side, and GELU computes only the small-value branch when all four values are in it: 29.1 s.
 
 ## 2026-09-23 — Port HTDemucs to pure Rust, no ONNX at runtime
 

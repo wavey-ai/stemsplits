@@ -121,6 +121,7 @@ the old kernel at one thread and at two threads.
 | Softmax `exp` in NEON, four values at a time | 31.2 s |
 | GLU sigmoid with the same `exp` | 30.6 s |
 | GELU `erff` in NEON, four values at a time | 29.9 s |
+| Softmax of four rows side by side; GELU with only the small-value branch when all four values are small | 29.1 s |
 
 - On Linux, `f32::exp` is the glibc `expf`. `exp_in_place` uses the
   arithmetic of that `expf` in NEON. Its fast range covers 2,130,706,432
@@ -130,6 +131,18 @@ the old kernel at one thread and at two threads.
 - `neon_erf::erf4` computes each branch of `libm::erff`, and of the
   `libm::expf` that it calls, with the same f32 operations. The test
   `erf4_equals_libm_erff_for_every_finite_f32` checks each finite f32.
+
+Two changes did not make a segment faster, and the code does not use them:
+
+| Change | Segment | Output |
+| --- | ---: | --- |
+| Fused multiply-add in the GEMM blocks | 29.7 s | −120 dB from the exact output |
+| Eight rows by 12 columns in the GEMM micro-kernel | 31.1 s | Same bits |
+| `conv1d` patches copied by tap range | 29.3 s | Same bits |
+
+- The samples of the GEMM fall mostly on the loads of the inner loop. The
+  fused multiply-add halves the arithmetic instructions and gives the same
+  time.
 
 Block sizes, one thread:
 

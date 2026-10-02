@@ -350,22 +350,67 @@ fn attention_head(
         let rows = query.len() / head_dim;
         let scores = &mut scores[..rows * keys];
         crate::matmul::matmul(query, keys_transposed, scores, rows, head_dim, keys);
-        for row in scores.chunks_mut(keys) {
-            let maximum = row.iter().copied().fold(f32::MIN, f32::max);
-            for value in row.iter_mut() {
-                *value -= maximum;
-            }
-            crate::ops::exp_in_place(row);
-            let mut sum = 0.0f32;
-            for value in row.iter() {
-                sum += *value;
-            }
+        softmax_rows(scores, keys);
+        crate::matmul::matmul(scores, v, output, rows, keys, head_dim);
+    }
+}
+
+/// Softmax of each row of `scores` in place. Each row subtracts its
+/// maximum, sums its exponentials in column order and divides by the sum.
+/// Four rows run side by side, so the four sums do not wait on each other.
+fn softmax_rows(scores: &mut [f32], keys: usize) {
+    let mut groups = scores.chunks_exact_mut(4 * keys);
+    for group in &mut groups {
+        let mut sums = [0.0f32; 4];
+        for row in group.chunks_mut(keys) {
+            shift_and_exp(row);
+        }
+        let (r0, rest) = group.split_at(keys);
+        let (r1, rest) = rest.split_at(keys);
+        let (r2, r3) = rest.split_at(keys);
+        for i in 0..keys {
+            sums[0] += r0[i];
+            sums[1] += r1[i];
+            sums[2] += r2[i];
+            sums[3] += r3[i];
+        }
+        for (row, sum) in group.chunks_mut(keys).zip(sums) {
             for value in row.iter_mut() {
                 *value /= sum;
             }
         }
-        crate::matmul::matmul(scores, v, output, rows, keys, head_dim);
     }
+    for row in groups.into_remainder().chunks_mut(keys) {
+        shift_and_exp(row);
+        let mut sum = 0.0f32;
+        for value in row.iter() {
+            sum += *value;
+        }
+        for value in row.iter_mut() {
+            *value /= sum;
+        }
+    }
+}
+
+/// `exp(value - maximum)` over a row. The maximum of a set does not depend
+/// on the order of comparison, so it is taken over four lanes.
+fn shift_and_exp(row: &mut [f32]) {
+    let mut lanes = [f32::MIN; 4];
+    let mut chunks = row.chunks_exact(4);
+    for chunk in &mut chunks {
+        for lane in 0..4 {
+            lanes[lane] = lanes[lane].max(chunk[lane]);
+        }
+    }
+    let maximum = chunks
+        .remainder()
+        .iter()
+        .copied()
+        .fold(lanes.into_iter().fold(f32::MIN, f32::max), f32::max);
+    for value in row.iter_mut() {
+        *value -= maximum;
+    }
+    crate::ops::exp_in_place(row);
 }
 
 /// `[B, T, C]` -> `[B * H, T, D]`, head-major and contiguous.
